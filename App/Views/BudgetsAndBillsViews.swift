@@ -1,4 +1,13 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+private func dismissActiveDecimalKeyboard() {
+    #if canImport(UIKit)
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    #endif
+}
 
 // MARK: - Screen D: Budget Management View
 
@@ -7,18 +16,27 @@ public struct BudgetsView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var showingAddCategoryBudget = false
-    @State private var showingAddCommitment = false
+    @State private var isEditingExistingCategoryBudget = false
+    @State private var showingCommitmentSheet = false
+    @State private var editingCommitmentId: UUID? = nil
+
     @State private var newBudgetCategory: AustralianCategory = .groceries
     @State private var newBudgetDollars: String = "350.00"
     @State private var newBudgetRollover: Bool = false
+    @State private var budgetSheetError: String? = nil
 
     @State private var newCommitmentTitle: String = ""
     @State private var newCommitmentCategory: AustralianCategory = .rentAndMortgage
     @State private var newCommitmentDollars: String = ""
     @State private var newCommitmentFrequency: PayFrequency = .fortnightly
     @State private var newCommitmentDueDate: Date = Date()
+    @State private var commitmentSheetError: String? = nil
 
     @State private var customOverrideDollars: String = ""
+    @State private var customCapFeedbackMessage: String? = nil
+    @FocusState private var customCapFieldFocused: Bool
+    @FocusState private var budgetLimitFieldFocused: Bool
+    @FocusState private var commitmentFieldFocused: Bool
 
     public init(store: DaylightStore) {
         self.store = store
@@ -26,6 +44,22 @@ public struct BudgetsView: View {
 
     private var summary: DailyAllowanceSummary {
         store.allowanceSummary
+    }
+
+    private var activePeriodLabel: String {
+        store.profile.preferredBudgetingMethod == .monthlyFlexible
+            ? "Calendar Month"
+            : store.profile.payFrequency.displayName
+    }
+
+    private var effectiveFixedCategorySet: Set<AustralianCategory> {
+        FinancialCalculationEngine.effectiveFixedCommitmentCategories(fixedCommitments: store.fixedCommitments)
+    }
+
+    private var totalAllocatedFlexibleEnvelopesCents: MoneyCents {
+        store.categoryBudgetProgress
+            .filter { !effectiveFixedCategorySet.contains($0.category) }
+            .reduce(MoneyCents(0)) { $0 + $1.budgetedCents }
     }
 
     public var body: some View {
@@ -40,8 +74,19 @@ public struct BudgetsView: View {
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
         .navigationTitle("Budgets")
+        .onAppear {
+            syncCustomCapFieldFromProfile()
+        }
+        .onChange(of: store.activeTenantId) { _, _ in
+            syncCustomCapFieldFromProfile()
+            customCapFeedbackMessage = nil
+        }
+        .onChange(of: store.profile.customFlexibleCapCents) { _, _ in
+            syncCustomCapFieldFromProfile()
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -57,18 +102,71 @@ public struct BudgetsView: View {
                 }
 
                 Button {
-                    showingAddCategoryBudget = true
+                    openAddCategoryBudgetSheet()
                 } label: {
                     Label("Add Category Limit", systemImage: "plus.circle.fill")
                 }
+            }
+
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    customCapFieldFocused = false
+                    dismissActiveDecimalKeyboard()
+                }
+                .fontWeight(.semibold)
             }
         }
         .sheet(isPresented: $showingAddCategoryBudget) {
             addCategoryBudgetSheet
         }
-        .sheet(isPresented: $showingAddCommitment) {
-            addFixedCommitmentSheet
+        .sheet(isPresented: $showingCommitmentSheet) {
+            addOrEditFixedCommitmentSheet
         }
+    }
+
+    private func syncCustomCapFieldFromProfile() {
+        if let cap = store.profile.customFlexibleCapCents {
+            customOverrideDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: cap)
+        } else {
+            customOverrideDollars = ""
+        }
+    }
+
+    private func openAddCategoryBudgetSheet() {
+        isEditingExistingCategoryBudget = false
+        budgetSheetError = nil
+        newBudgetCategory = .groceries
+        if let existing = store.categoryBudgetProgress.first(where: { $0.category == .groceries }) {
+            newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: existing.baseLimitCents)
+            newBudgetRollover = store.categoryBudgets.first(where: { $0.category == .groceries })?.rolloverEnabled ?? false
+        } else {
+            newBudgetDollars = "350.00"
+            newBudgetRollover = store.profile.enableBudgetRollover
+        }
+        showingAddCategoryBudget = true
+    }
+
+    private func openAddFixedCommitmentSheet() {
+        editingCommitmentId = nil
+        commitmentSheetError = nil
+        newCommitmentTitle = ""
+        newCommitmentCategory = .rentAndMortgage
+        newCommitmentDollars = ""
+        newCommitmentFrequency = store.profile.preferredBudgetingMethod == .monthlyFlexible ? .monthly : store.profile.payFrequency
+        newCommitmentDueDate = store.referenceDate
+        showingCommitmentSheet = true
+    }
+
+    private func openEditFixedCommitmentSheet(_ item: FixedCommitment) {
+        editingCommitmentId = item.id
+        commitmentSheetError = nil
+        newCommitmentTitle = item.title
+        newCommitmentCategory = item.category
+        newCommitmentDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: item.amountCents)
+        newCommitmentFrequency = item.frequency
+        newCommitmentDueDate = item.nextDueDate
+        showingCommitmentSheet = true
     }
 
     private var budgetingMethodSelectorCard: some View {
@@ -77,7 +175,7 @@ public struct BudgetsView: View {
                 HStack {
                     DaylightBadge("6 Supported Budgeting Methods", icon: "slider.horizontal.3", tone: .neutral)
                     Spacer()
-                    Text("Cycle: \(store.profile.payFrequency.displayName)")
+                    Text("Cycle: \(activePeriodLabel)")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -90,8 +188,10 @@ public struct BudgetsView: View {
                         ForEach(BudgetingMethod.allCases) { method in
                             Button {
                                 var p = store.profile
+                                p.tenantId = store.activeTenantId
                                 p.preferredBudgetingMethod = method
                                 try? store.updateProfile(p)
+                                customCapFeedbackMessage = nil
                             } label: {
                                 if method == store.profile.preferredBudgetingMethod {
                                     Label(method.displayName, systemImage: "checkmark")
@@ -110,21 +210,36 @@ public struct BudgetsView: View {
                     .foregroundStyle(.secondary)
 
                 if store.profile.preferredBudgetingMethod == .custom {
-                    HStack {
-                        TextField("Custom Period Flexible Cap (AUD)", text: $customOverrideDollars)
-                            .textFieldStyle(.roundedBorder)
-                            #if os(iOS)
-                            .keyboardType(.decimalPad)
-                            #endif
-                        Button("Apply Cap") {
-                            if let cents = AustralianMoneyFormatter.parseToCents(customOverrideDollars), cents > 0 {
-                                var p = store.profile
-                                p.customFlexibleCapCents = cents
-                                try? store.updateProfile(p)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            TextField("Custom Period Flexible Cap (AUD)", text: $customOverrideDollars)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($customCapFieldFocused)
+                                #if os(iOS)
+                                .keyboardType(.decimalPad)
+                                #endif
+                            Button("Apply Cap") {
+                                customCapFieldFocused = false
+                                dismissActiveDecimalKeyboard()
+                                if let cents = AustralianMoneyFormatter.parseToCents(customOverrideDollars), cents >= 0 {
+                                    var p = store.profile
+                                    p.tenantId = store.activeTenantId
+                                    p.customFlexibleCapCents = cents
+                                    try? store.updateProfile(p)
+                                    customCapFeedbackMessage = "Applied custom flexible cap of \(AustralianMoneyFormatter.format(cents: cents)) for this \(summary.totalDaysInPeriod)-day period."
+                                } else {
+                                    customCapFeedbackMessage = "Enter a valid non-negative AUD amount (e.g. 1200.00)."
+                                }
                             }
+                            .buttonStyle(.borderedProminent)
+                            .tint(DaylightTheme.accent)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(DaylightTheme.accent)
+
+                        if let feedback = customCapFeedbackMessage {
+                            Text(feedback)
+                                .font(.caption)
+                                .foregroundStyle(DaylightTheme.accent)
+                        }
                     }
                 }
             }
@@ -132,19 +247,49 @@ public struct BudgetsView: View {
     }
 
     private var periodOverviewCard: some View {
-        DaylightCard {
-            VStack(alignment: .leading, spacing: 12) {
-                DaylightSectionHeader(
-                    title: "Active Period Summary (\(summary.totalDaysInPeriod) Days)",
-                    subtitle: "\(AustralianDateHelper.formatMediumDate(summary.periodStart, timeZoneId: store.profile.timeZoneId)) – \(AustralianDateHelper.formatMediumDate(summary.periodEnd, timeZoneId: store.profile.timeZoneId))",
-                    trailingTitle: "View Formula"
-                ) {
-                    store.showingCalculationExplainer = true
-                }
+        let ratio: Double = {
+            if summary.totalFlexibleBudgetForPeriodCents > 0 {
+                return min(1.0, max(0.0, Double(summary.totalFlexibleSpentInPeriodCents) / Double(summary.totalFlexibleBudgetForPeriodCents)))
+            }
+            return summary.totalFlexibleSpentInPeriodCents > 0 ? 1.0 : 0.0
+        }()
 
-                let ratio = summary.totalFlexibleBudgetForPeriodCents > 0
-                    ? min(1.0, Double(summary.totalFlexibleSpentInPeriodCents) / Double(summary.totalFlexibleBudgetForPeriodCents))
-                    : 0.0
+        return DaylightCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Active Period Summary (\(summary.totalDaysInPeriod) Days)")
+                            .font(.headline)
+                        Text("\(AustralianDateHelper.formatMediumDate(summary.periodStart, timeZoneId: store.profile.timeZoneId)) – \(AustralianDateHelper.formatMediumDate(summary.periodEnd, timeZoneId: store.profile.timeZoneId)) • \(summary.remainingDaysInPeriod) day\(summary.remainingDaysInPeriod == 1 ? "" : "s") left")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        store.showingCalculationExplainer = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(DaylightTheme.accent)
+                            .frame(width: 34, height: 34, alignment: .center)
+                            .background(
+                                Circle()
+                                    .fill(DaylightTheme.sageSurface(for: colorScheme))
+                            )
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(
+                                        DaylightTheme.accent.opacity(colorScheme == .dark ? 0.28 : 0.18),
+                                        lineWidth: 1
+                                    )
+                            )
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("View active period budget formula")
+                }
 
                 ProgressView(value: ratio)
                     .tint(summary.remainingFlexibleBudgetForPeriodCents < 0 ? DaylightTheme.cautionRed : DaylightTheme.positive)
@@ -152,14 +297,49 @@ public struct BudgetsView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                     statBlock("Flexible Budgeted", cents: summary.totalFlexibleBudgetForPeriodCents)
                     statBlock("Flexible Spent", cents: summary.totalFlexibleSpentInPeriodCents)
-                    statBlock("Flexible Remaining", cents: summary.remainingFlexibleBudgetForPeriodCents)
+                    statBlock(
+                        "Flexible Remaining",
+                        cents: summary.remainingFlexibleBudgetForPeriodCents,
+                        highlightNegative: true
+                    )
                     statBlock("Expected End-of-Period Spend", cents: summary.forecastEndOfPeriodFlexibleSpendCents)
+                }
+
+                Divider()
+
+                // Cash-flow & envelope reconciliation line so every dollar on the Budgets page adds up visibly
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(
+                        "Period derivation: Income \(AustralianMoneyFormatter.format(cents: summary.periodTakeHomeIncomeCents)) − Fixed Bills \(AustralianMoneyFormatter.format(cents: summary.totalFixedCommitmentsForPeriodCents)) − Savings \(AustralianMoneyFormatter.format(cents: summary.plannedSavingsForPeriodCents)) • Safe-to-Spend today: \(AustralianMoneyFormatter.format(cents: summary.todaysRemainingAllowanceCents))"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+
+                    if totalAllocatedFlexibleEnvelopesCents > 0 && summary.totalFlexibleBudgetForPeriodCents > 0 {
+                        let unallocatedDiff = summary.totalFlexibleBudgetForPeriodCents - totalAllocatedFlexibleEnvelopesCents
+                        if unallocatedDiff >= 0 {
+                            Text(
+                                "Envelope check: \(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents)) allocated across flexible categories • \(AustralianMoneyFormatter.format(cents: unallocatedDiff)) unallocated flexible buffer."
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        } else {
+                            Text(
+                                "Envelope notice: Flexible category limits (\(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents))) exceed your period flexible budget by \(AustralianMoneyFormatter.format(cents: abs(unallocatedDiff)))."
+                            )
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(DaylightTheme.warning)
+                            .monospacedDigit()
+                        }
+                    }
                 }
             }
         }
     }
 
-    private func statBlock(_ label: String, cents: MoneyCents) -> some View {
+    private func statBlock(_ label: String, cents: MoneyCents, highlightNegative: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.caption)
@@ -167,6 +347,7 @@ public struct BudgetsView: View {
             Text(AustralianMoneyFormatter.format(cents: cents))
                 .font(.headline.weight(.bold))
                 .monospacedDigit()
+                .foregroundStyle(highlightNegative && cents < 0 ? DaylightTheme.cautionRed : .primary)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -180,10 +361,10 @@ public struct BudgetsView: View {
         VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
             DaylightSectionHeader(
                 title: "Category Limits & Envelopes",
-                subtitle: "Tap a category to inspect underlying transactions",
+                subtitle: "Normalized to your active \(summary.totalDaysInPeriod)-day period • Tap a category's transactions to inspect",
                 trailingTitle: "+ Add Category Limit"
             ) {
-                showingAddCategoryBudget = true
+                openAddCategoryBudgetSheet()
             }
 
             if store.categoryBudgetProgress.isEmpty {
@@ -193,7 +374,7 @@ public struct BudgetsView: View {
                     message: "Create category limits for Groceries, Cafes, or Transport to track pacing alongside your daily safe-to-spend allowance.",
                     actionTitle: "Set Up First Category Limit"
                 ) {
-                    showingAddCategoryBudget = true
+                    openAddCategoryBudgetSheet()
                 }
             } else {
                 ForEach(store.categoryBudgetProgress) { prog in
@@ -216,11 +397,26 @@ public struct BudgetsView: View {
                             ProgressView(value: min(1.0, max(0.0, prog.percentageUsed)))
                                 .tint(prog.isOverBudget ? DaylightTheme.cautionRed : (prog.percentageUsed > 0.8 ? DaylightTheme.warning : DaylightTheme.positive))
 
-                            HStack {
+                            HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Spent: \(AustralianMoneyFormatter.format(cents: prog.netSpentCents)) of \(AustralianMoneyFormatter.format(cents: prog.budgetedCents))")
                                         .font(.subheadline.weight(.medium))
                                         .monospacedDigit()
+
+                                    if prog.rolloverAppliedCents != 0 || prog.sourceLimitCents != prog.baseLimitCents {
+                                        let basePart = "Base limit \(AustralianMoneyFormatter.format(cents: prog.baseLimitCents))"
+                                        let rolloverPart = prog.rolloverAppliedCents != 0
+                                            ? " (\(AustralianMoneyFormatter.format(cents: prog.rolloverAppliedCents, showPlusForPositive: true)) rollover)"
+                                            : ""
+                                        let scaledPart = prog.sourceLimitCents != prog.baseLimitCents
+                                            ? " • Scaled from \(AustralianMoneyFormatter.format(cents: prog.sourceLimitCents)) \(prog.sourcePeriodType.displayName)"
+                                            : ""
+                                        Text("\(basePart)\(rolloverPart)\(scaledPart)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                    }
+
                                     Text("Expected end-of-period: \(AustralianMoneyFormatter.format(cents: prog.projectedEndOfPeriodCents))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -235,8 +431,11 @@ public struct BudgetsView: View {
 
                                     HStack(spacing: 8) {
                                         Button("Edit Limit") {
+                                            isEditingExistingCategoryBudget = true
+                                            budgetSheetError = nil
                                             newBudgetCategory = prog.category
-                                            newBudgetDollars = String(format: "%.2f", Double(prog.budgetedCents) / 100.0)
+                                            // Always edit the clean active-period base limit so rollover is never compounded on save
+                                            newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: prog.baseLimitCents)
                                             if let existing = store.categoryBudgets.first(where: { $0.category == prog.category }) {
                                                 newBudgetRollover = existing.rolloverEnabled
                                             }
@@ -276,40 +475,85 @@ public struct BudgetsView: View {
     }
 
     private var fixedCommitmentsSection: some View {
-        DaylightCard {
+        let isMonthlyCalendarMode = (store.profile.preferredBudgetingMethod == .monthlyFlexible)
+        return DaylightCard {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
                 DaylightSectionHeader(
                     title: "Reserved Fixed Commitments",
                     subtitle: "Subtracted before calculating flexible spending (never double-counted when paid)",
                     trailingTitle: "+ Add Fixed Bill"
                 ) {
-                    showingAddCommitment = true
+                    openAddFixedCommitmentSheet()
                 }
 
-                ForEach(store.fixedCommitments) { item in
-                    HStack {
-                        Image(systemName: item.category.symbolName)
-                            .foregroundStyle(item.category.tintColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.title)
-                                .font(.subheadline.weight(.medium))
-                            Text("\(item.category.displayName) • \(item.frequency.displayName)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                if store.fixedCommitments.isEmpty {
+                    Text("No fixed commitments configured yet. Add recurring rent, mortgage, strata, utilities, or loan instalments here so they are reserved before calculating your daily spending allowance.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(store.fixedCommitments) { item in
+                        let normalizedForPeriodCents = FinancialCalculationEngine.normalizedAmountForPeriod(
+                            amountCents: item.amountCents,
+                            sourceFrequency: item.frequency,
+                            isMonthlyCalendarMode: isMonthlyCalendarMode,
+                            periodDays: summary.totalDaysInPeriod
+                        )
+                        HStack {
+                            Image(systemName: item.category.symbolName)
+                                .foregroundStyle(item.category.tintColor)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.subheadline.weight(.medium))
+                                Text("\(item.category.displayName) • \(item.frequency.displayName) • Next due \(AustralianDateHelper.formatShortDate(item.nextDueDate, timeZoneId: store.profile.timeZoneId))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(AustralianMoneyFormatter.format(cents: item.amountCents))
+                                    .font(.subheadline.weight(.bold))
+                                    .monospacedDigit()
+                                if normalizedForPeriodCents != item.amountCents {
+                                    Text("\(AustralianMoneyFormatter.format(cents: normalizedForPeriodCents)) / \(summary.totalDaysInPeriod)d period")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                }
+                            }
+                            Button {
+                                openEditFixedCommitmentSheet(item)
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Edit \(item.title)")
+
+                            Button(role: .destructive) {
+                                store.deleteFixedCommitment(id: item.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Delete \(item.title)")
                         }
-                        Spacer()
-                        Text(AustralianMoneyFormatter.format(cents: item.amountCents))
-                            .font(.subheadline.weight(.bold))
-                            .monospacedDigit()
-                        Button(role: .destructive) {
-                            store.deleteFixedCommitment(id: item.id)
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.borderless)
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+
+                    Divider()
+
+                    HStack {
+                        Text("Period Fixed Reserve (\(summary.totalDaysInPeriod) days)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(AustralianMoneyFormatter.format(cents: summary.totalFixedCommitmentsForPeriodCents)) total • \(AustralianMoneyFormatter.format(cents: summary.unpaidFixedCommitmentsRemainingCents)) unpaid left")
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -318,116 +562,200 @@ public struct BudgetsView: View {
     private var addCategoryBudgetSheet: some View {
         NavigationStack {
             Form {
-                HStack {
-                    Text("Category")
-                    Spacer()
-                    Menu {
-                        ForEach(AustralianCategory.expenseCategories) { cat in
-                            Button {
-                                newBudgetCategory = cat
-                            } label: {
-                                if cat == newBudgetCategory {
-                                    Label(cat.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(cat.displayName)
+                Section {
+                    HStack {
+                        Text("Category")
+                        Spacer()
+                        Menu {
+                            ForEach(AustralianCategory.expenseCategories) { cat in
+                                Button {
+                                    newBudgetCategory = cat
+                                    if let existing = store.categoryBudgetProgress.first(where: { $0.category == cat }) {
+                                        newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: existing.baseLimitCents)
+                                        newBudgetRollover = store.categoryBudgets.first(where: { $0.category == cat })?.rolloverEnabled ?? false
+                                    }
+                                } label: {
+                                    if cat == newBudgetCategory {
+                                        Label(cat.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(cat.displayName)
+                                    }
                                 }
                             }
+                        } label: {
+                            DaylightDropdownPill(newBudgetCategory.displayName, icon: newBudgetCategory.symbolName)
                         }
-                    } label: {
-                        DaylightDropdownPill(newBudgetCategory.displayName, icon: newBudgetCategory.symbolName)
+                    }
+
+                    TextField("Base Limit for \(activePeriodLabel) in AUD (e.g. 380.00)", text: $newBudgetDollars)
+                        .focused($budgetLimitFieldFocused)
+                        #if os(iOS)
+                        .keyboardType(.decimalPad)
+                        #endif
+
+                    Toggle("Enable Unspent Rollover to Next Period", isOn: $newBudgetRollover)
+                } footer: {
+                    if effectiveFixedCategorySet.contains(newBudgetCategory) {
+                        Text("\(newBudgetCategory.displayName) is a fixed-bill category. Its category card will track bill spending, while Safe-to-Spend continues reserving fixed bills once so they are never double-counted.")
+                    } else {
+                        Text("This base limit applies to your active \(activePeriodLabel.lowercased()) period and scales automatically if you switch between fortnightly, weekly, or calendar-month budgeting.")
                     }
                 }
-                TextField("Period Limit in AUD (e.g. 380.00)", text: $newBudgetDollars)
-                    #if os(iOS)
-                    .keyboardType(.decimalPad)
-                    #endif
-                Toggle("Enable Unspent Rollover to Next Period", isOn: $newBudgetRollover)
+
+                if let error = budgetSheetError {
+                    Section {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                    }
+                }
             }
-            .navigationTitle("Set Category Limit")
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(isEditingExistingCategoryBudget ? "Edit Category Limit" : "Set Category Limit")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { showingAddCategoryBudget = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        budgetLimitFieldFocused = false
+                        dismissActiveDecimalKeyboard()
                         if let cents = AustralianMoneyFormatter.parseToCents(newBudgetDollars), cents > 0 {
-                            store.upsertCategoryBudget(category: newBudgetCategory, limitCents: cents, rolloverEnabled: newBudgetRollover)
+                            store.upsertCategoryBudget(
+                                category: newBudgetCategory,
+                                limitCents: cents,
+                                rolloverEnabled: newBudgetRollover
+                            )
                             showingAddCategoryBudget = false
+                        } else {
+                            budgetSheetError = "Please enter a positive AUD limit greater than $0.00."
                         }
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        budgetLimitFieldFocused = false
+                        dismissActiveDecimalKeyboard()
+                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
     }
 
-    private var addFixedCommitmentSheet: some View {
+    private var addOrEditFixedCommitmentSheet: some View {
         NavigationStack {
             Form {
-                TextField("Commitment Name (e.g. Rent, Strata, Childcare)", text: $newCommitmentTitle)
-                HStack {
-                    Text("Category")
-                    Spacer()
-                    Menu {
-                        ForEach(AustralianCategory.expenseCategories) { cat in
-                            Button {
-                                newCommitmentCategory = cat
-                            } label: {
-                                if cat == newCommitmentCategory {
-                                    Label(cat.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(cat.displayName)
+                Section {
+                    TextField("Commitment Name (e.g. Rent, Strata, Childcare)", text: $newCommitmentTitle)
+
+                    HStack {
+                        Text("Category")
+                        Spacer()
+                        Menu {
+                            ForEach(AustralianCategory.expenseCategories) { cat in
+                                Button {
+                                    newCommitmentCategory = cat
+                                } label: {
+                                    if cat == newCommitmentCategory {
+                                        Label(cat.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(cat.displayName)
+                                    }
                                 }
                             }
+                        } label: {
+                            DaylightDropdownPill(newCommitmentCategory.displayName, icon: newCommitmentCategory.symbolName)
                         }
-                    } label: {
-                        DaylightDropdownPill(newCommitmentCategory.displayName, icon: newCommitmentCategory.symbolName)
                     }
-                }
-                TextField("Amount in AUD (e.g. 920.00)", text: $newCommitmentDollars)
-                    #if os(iOS)
-                    .keyboardType(.decimalPad)
-                    #endif
-                HStack {
-                    Text("Frequency")
-                    Spacer()
-                    Menu {
-                        ForEach(PayFrequency.allCases) { freq in
-                            Button {
-                                newCommitmentFrequency = freq
-                            } label: {
-                                if freq == newCommitmentFrequency {
-                                    Label(freq.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(freq.displayName)
+
+                    TextField("Amount in AUD (e.g. 920.00)", text: $newCommitmentDollars)
+                        .focused($commitmentFieldFocused)
+                        #if os(iOS)
+                        .keyboardType(.decimalPad)
+                        #endif
+
+                    HStack {
+                        Text("Frequency")
+                        Spacer()
+                        Menu {
+                            ForEach(PayFrequency.allCases) { freq in
+                                Button {
+                                    newCommitmentFrequency = freq
+                                } label: {
+                                    if freq == newCommitmentFrequency {
+                                        Label(freq.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(freq.displayName)
+                                    }
                                 }
                             }
+                        } label: {
+                            DaylightDropdownPill(newCommitmentFrequency.displayName, icon: "repeat")
                         }
-                    } label: {
-                        DaylightDropdownPill(newCommitmentFrequency.displayName, icon: "repeat")
+                    }
+
+                    DatePicker("Next Due Date", selection: $newCommitmentDueDate, displayedComponents: [.date])
+                } footer: {
+                    Text("Confirmed commitments in \(newCommitmentCategory.displayName) are reserved up-front for the active period and reconciled against matching payments so the same bill is never subtracted twice.")
+                }
+
+                if let error = commitmentSheetError {
+                    Section {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(DaylightTheme.cautionRed)
                     }
                 }
-                DatePicker("Next Due Date", selection: $newCommitmentDueDate, displayedComponents: [.date])
             }
-            .navigationTitle("Add Fixed Commitment")
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(editingCommitmentId == nil ? "Add Fixed Commitment" : "Edit Fixed Commitment")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { showingAddCommitment = false }
+                    Button("Cancel") { showingCommitmentSheet = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        if let cents = AustralianMoneyFormatter.parseToCents(newCommitmentDollars),
-                           cents > 0,
-                           !newCommitmentTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            store.addFixedCommitment(
-                                title: newCommitmentTitle,
+                    Button(editingCommitmentId == nil ? "Add" : "Save") {
+                        commitmentFieldFocused = false
+                        dismissActiveDecimalKeyboard()
+                        let cleanTitle = newCommitmentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !cleanTitle.isEmpty else {
+                            commitmentSheetError = "Please enter a name for this fixed commitment."
+                            return
+                        }
+                        guard let cents = AustralianMoneyFormatter.parseToCents(newCommitmentDollars), cents > 0 else {
+                            commitmentSheetError = "Please enter a positive AUD amount greater than $0.00."
+                            return
+                        }
+                        if let existingId = editingCommitmentId {
+                            store.updateFixedCommitment(
+                                id: existingId,
+                                title: cleanTitle,
                                 category: newCommitmentCategory,
                                 amountCents: cents,
                                 frequency: newCommitmentFrequency,
                                 nextDueDate: newCommitmentDueDate
                             )
-                            showingAddCommitment = false
+                        } else {
+                            store.addFixedCommitment(
+                                title: cleanTitle,
+                                category: newCommitmentCategory,
+                                amountCents: cents,
+                                frequency: newCommitmentFrequency,
+                                nextDueDate: newCommitmentDueDate
+                            )
                         }
+                        showingCommitmentSheet = false
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        commitmentFieldFocused = false
+                        dismissActiveDecimalKeyboard()
+                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
@@ -447,6 +775,8 @@ public struct BillsAndSubscriptionsView: View {
     @State private var billFrequency: RecurringFrequency = .monthly
     @State private var billNextDate = Date()
     @State private var billRail = "Direct Debit"
+    @State private var billSheetError: String? = nil
+    @FocusState private var billAmountFocused: Bool
 
     public init(store: DaylightStore) {
         self.store = store
@@ -484,6 +814,7 @@ public struct BillsAndSubscriptionsView: View {
                             subtitle: "Verified commitments factored into upcoming cash-flow checks",
                             trailingTitle: "+ Add Scheduled Bill"
                         ) {
+                            billSheetError = nil
                             showingAddBillSheet = true
                         }
 
@@ -529,6 +860,7 @@ public struct BillsAndSubscriptionsView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    billSheetError = nil
                     showingAddBillSheet = true
                 } label: {
                     Label("Add Bill", systemImage: "plus.circle.fill")
@@ -559,6 +891,7 @@ public struct BillsAndSubscriptionsView: View {
                         }
                     }
                     TextField("Expected Amount in AUD (e.g. 89.00)", text: $billAmountDollars)
+                        .focused($billAmountFocused)
                         #if os(iOS)
                         .keyboardType(.decimalPad)
                         #endif
@@ -583,7 +916,14 @@ public struct BillsAndSubscriptionsView: View {
                     }
                     TextField("Payment Rail (BPAY, Direct Debit, Osko, Card)", text: $billRail)
                     DatePicker("Next Expected Date", selection: $billNextDate, displayedComponents: [.date])
+
+                    if let error = billSheetError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                    }
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .navigationTitle("Add Scheduled Bill")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -591,20 +931,34 @@ public struct BillsAndSubscriptionsView: View {
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") {
-                            if let cents = AustralianMoneyFormatter.parseToCents(billAmountDollars),
-                               cents > 0,
-                               !billMerchant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                store.addConfirmedRecurringBill(
-                                    merchantName: billMerchant,
-                                    category: billCategory,
-                                    expectedAmountCents: cents,
-                                    frequency: billFrequency,
-                                    nextExpectedDate: billNextDate,
-                                    paymentRail: billRail
-                                )
-                                showingAddBillSheet = false
+                            billAmountFocused = false
+                            dismissActiveDecimalKeyboard()
+                            guard !billMerchant.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                billSheetError = "Please enter a merchant or biller name."
+                                return
                             }
+                            guard let cents = AustralianMoneyFormatter.parseToCents(billAmountDollars), cents > 0 else {
+                                billSheetError = "Please enter a positive AUD amount greater than $0.00."
+                                return
+                            }
+                            store.addConfirmedRecurringBill(
+                                merchantName: billMerchant,
+                                category: billCategory,
+                                expectedAmountCents: cents,
+                                frequency: billFrequency,
+                                nextExpectedDate: billNextDate,
+                                paymentRail: billRail
+                            )
+                            showingAddBillSheet = false
                         }
+                    }
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("Done") {
+                            billAmountFocused = false
+                            dismissActiveDecimalKeyboard()
+                        }
+                        .fontWeight(.semibold)
                     }
                 }
             }
@@ -688,8 +1042,9 @@ public struct SavingsGoalsView: View {
     @State private var newGoalName = ""
     @State private var newGoalIcon = "lifepreserver.fill"
     @State private var newGoalTargetDollars = "5000.00"
-    @State private var newGoalInitialDollars = "500.00"
+    @State private var newGoalInitialDollars = "0.00"
     @State private var newGoalTargetDate = Calendar.current.date(byAdding: .month, value: 6, to: Date()) ?? Date()
+    @State private var goalSheetError: String? = nil
 
     @State private var editGoalName = ""
     @State private var editGoalIcon = "lifepreserver.fill"
@@ -725,6 +1080,7 @@ public struct SavingsGoalsView: View {
                         message: "Track an Emergency Fund, Holiday, Car, or First Home Deposit with clear payday contribution targets.",
                         actionTitle: "Create Savings Goal"
                     ) {
+                        goalSheetError = nil
                         showingAddGoal = true
                     }
                 } else {
@@ -742,6 +1098,7 @@ public struct SavingsGoalsView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    goalSheetError = nil
                     showingAddGoal = true
                 } label: {
                     Label("New Goal", systemImage: "plus.circle.fill")
@@ -761,17 +1118,18 @@ public struct SavingsGoalsView: View {
 
     private func goalCard(_ goal: SavingsGoal) -> some View {
         let ratio = goal.targetAmountCents > 0
-            ? min(1.0, Double(goal.currentSavedCents) / Double(goal.targetAmountCents))
+            ? min(1.0, max(0.0, Double(goal.currentSavedCents) / Double(goal.targetAmountCents)))
             : 1.0
-        let remainingCents = max(0, goal.targetAmountCents - goal.currentSavedCents)
 
-        // Calculate suggested contribution per pay cycle if targetDate is set
-        let suggestedPerCycleCents: MoneyCents? = {
-            guard let targetDate = goal.targetDate, remainingCents > 0 else { return nil }
-            let daysLeft = max(1, Int(targetDate.timeIntervalSince(store.referenceDate) / 86400))
-            let cyclesLeft = max(1, daysLeft / max(1, store.profile.payFrequency.nominalPeriodDays))
-            return remainingCents / Int64(cyclesLeft)
-        }()
+        // Exact Australian-calendar per-period contribution rounded UP to the cent so target is guaranteed on time
+        let suggestedPerCycleCents = FinancialCalculationEngine.suggestedContributionPerPeriodCents(
+            for: goal,
+            referenceDate: store.referenceDate,
+            profile: store.profile
+        )
+        let cadenceLabel = store.profile.preferredBudgetingMethod == .monthlyFlexible
+            ? "Month"
+            : store.profile.payFrequency.displayName
 
         return DaylightCard {
             VStack(alignment: .leading, spacing: 12) {
@@ -795,22 +1153,24 @@ public struct SavingsGoalsView: View {
                     Spacer()
 
                     Button {
+                        goalSheetError = nil
                         editGoalName = goal.name
                         editGoalIcon = goal.iconName
-                        editGoalTargetDollars = String(format: "%.2f", Double(goal.targetAmountCents) / 100.0)
-                        editGoalTargetDate = goal.targetDate ?? Date()
+                        editGoalTargetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: goal.targetAmountCents)
+                        editGoalTargetDate = goal.targetDate ?? store.referenceDate
                         selectedGoalForEdit = goal
                     } label: {
-                        Label("Edit", systemImage: "pencil")
+                        Label("Edit Goal", systemImage: "pencil")
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.bordered)
 
                     Button {
+                        goalSheetError = nil
                         contributionLinkedTransactionId = nil
                         selectedGoalForContribution = goal
                     } label: {
-                        Label("Log Contribution", systemImage: "plus.circle.fill")
+                        Label("Add Amount", systemImage: "plus.circle.fill")
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.borderedProminent)
@@ -832,9 +1192,10 @@ public struct SavingsGoalsView: View {
                 }
 
                 if let suggested = suggestedPerCycleCents {
-                    Text("Suggested schedule: \(AustralianMoneyFormatter.format(cents: suggested)) per \(store.profile.payFrequency.displayName) to reach target on time.")
+                    Text("Suggested schedule: \(AustralianMoneyFormatter.format(cents: suggested)) per \(cadenceLabel) to reach target on time.")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(DaylightTheme.accent)
+                        .monospacedDigit()
                 }
 
                 HStack {
@@ -893,7 +1254,14 @@ public struct SavingsGoalsView: View {
                     .keyboardType(.decimalPad)
                     #endif
                 DatePicker("Target Date", selection: $newGoalTargetDate, displayedComponents: [.date])
+
+                if let error = goalSheetError {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(DaylightTheme.cautionRed)
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("New Savings Goal")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -901,21 +1269,34 @@ public struct SavingsGoalsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
-                        if let target = AustralianMoneyFormatter.parseToCents(newGoalTargetDollars),
-                           target > 0,
-                           !newGoalName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            let initial = AustralianMoneyFormatter.parseToCents(newGoalInitialDollars) ?? 0
-                            store.addSavingsGoal(
-                                name: newGoalName,
-                                iconName: newGoalIcon,
-                                targetAmountCents: target,
-                                initialSavedCents: initial,
-                                targetDate: newGoalTargetDate,
-                                linkedAccountId: store.accounts.first(where: { $0.accountType == .highInterestSavings })?.id
-                            )
-                            showingAddGoal = false
+                        dismissActiveDecimalKeyboard()
+                        let cleanName = newGoalName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !cleanName.isEmpty else {
+                            goalSheetError = "Please enter a name for your savings goal."
+                            return
                         }
+                        guard let target = AustralianMoneyFormatter.parseToCents(newGoalTargetDollars), target > 0 else {
+                            goalSheetError = "Please enter a positive target amount greater than $0.00."
+                            return
+                        }
+                        let initial = max(0, AustralianMoneyFormatter.parseToCents(newGoalInitialDollars) ?? 0)
+                        store.addSavingsGoal(
+                            name: cleanName,
+                            iconName: newGoalIcon,
+                            targetAmountCents: target,
+                            initialSavedCents: initial,
+                            targetDate: newGoalTargetDate,
+                            linkedAccountId: store.accounts.first(where: { $0.accountType == .highInterestSavings })?.id
+                        )
+                        showingAddGoal = false
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        dismissActiveDecimalKeyboard()
+                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
@@ -946,7 +1327,14 @@ public struct SavingsGoalsView: View {
                     .keyboardType(.decimalPad)
                     #endif
                 DatePicker("Target Date", selection: $editGoalTargetDate, displayedComponents: [.date])
+
+                if let error = goalSheetError {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(DaylightTheme.cautionRed)
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Edit Savings Goal")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -954,19 +1342,32 @@ public struct SavingsGoalsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        if let target = AustralianMoneyFormatter.parseToCents(editGoalTargetDollars),
-                           target > 0,
-                           !editGoalName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            store.updateSavingsGoal(
-                                goalId: goal.id,
-                                name: editGoalName,
-                                iconName: editGoalIcon,
-                                targetAmountCents: target,
-                                targetDate: editGoalTargetDate
-                            )
-                            selectedGoalForEdit = nil
+                        dismissActiveDecimalKeyboard()
+                        let cleanName = editGoalName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !cleanName.isEmpty else {
+                            goalSheetError = "Please enter a name for your savings goal."
+                            return
                         }
+                        guard let target = AustralianMoneyFormatter.parseToCents(editGoalTargetDollars), target > 0 else {
+                            goalSheetError = "Please enter a positive target amount greater than $0.00."
+                            return
+                        }
+                        store.updateSavingsGoal(
+                            goalId: goal.id,
+                            name: cleanName,
+                            iconName: editGoalIcon,
+                            targetAmountCents: target,
+                            targetDate: editGoalTargetDate
+                        )
+                        selectedGoalForEdit = nil
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        dismissActiveDecimalKeyboard()
+                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
@@ -1002,8 +1403,15 @@ public struct SavingsGoalsView: View {
                             }
                         }
                     }
+
+                    if let error = goalSheetError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                    }
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Log Contribution")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1011,6 +1419,7 @@ public struct SavingsGoalsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
+                        dismissActiveDecimalKeyboard()
                         if let cents = AustralianMoneyFormatter.parseToCents(contributionDollars), cents > 0 {
                             store.addSavingsContribution(
                                 goalId: goal.id,
@@ -1019,8 +1428,17 @@ public struct SavingsGoalsView: View {
                                 linkedTransactionId: contributionLinkedTransactionId
                             )
                             selectedGoalForContribution = nil
+                        } else {
+                            goalSheetError = "Please enter a positive contribution amount greater than $0.00."
                         }
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        dismissActiveDecimalKeyboard()
+                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
