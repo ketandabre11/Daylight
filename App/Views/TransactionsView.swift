@@ -40,6 +40,10 @@ public struct TransactionsView: View {
         self.store = store
     }
 
+    private var duplicateTransactionIds: Set<UUID> {
+        Set(store.duplicateCandidates.map { $0.duplicateTransaction.id })
+    }
+
     private var filteredTransactions: [TransactionRecord] {
         let cal = AustralianDateHelper.calendar(for: store.profile.timeZoneId)
         let todayStart = cal.startOfDay(for: store.referenceDate)
@@ -73,14 +77,21 @@ public struct TransactionsView: View {
             case .all:
                 break
             case .today:
-                if tx.occurredAt < todayStart { return false }
+                let end = cal.date(byAdding: .day, value: 1, to: todayStart) ?? todayStart
+                if !(todayStart <= tx.occurredAt && tx.occurredAt < end) { return false }
             case .currentPeriod:
-                if tx.occurredAt < store.allowanceSummary.periodStart { return false }
+                let bounds = FinancialCalculationEngine.currentPeriodHalfOpenBounds(
+                    referenceDate: store.referenceDate,
+                    profile: store.profile
+                )
+                if !(bounds.startDate <= tx.occurredAt && tx.occurredAt < bounds.endDate) { return false }
             case .last30Days:
                 let thirtyAgo = cal.date(byAdding: .day, value: -30, to: todayStart) ?? todayStart
-                if tx.occurredAt < thirtyAgo { return false }
+                let end = cal.date(byAdding: .day, value: 1, to: todayStart) ?? todayStart
+                if !(thirtyAgo <= tx.occurredAt && tx.occurredAt < end) { return false }
             case .currentFY:
-                if tx.occurredAt < fyBounds.start || tx.occurredAt > fyBounds.end { return false }
+                let endExclusive = cal.date(byAdding: .day, value: 1, to: fyBounds.end) ?? fyBounds.end
+                if !(fyBounds.start <= tx.occurredAt && tx.occurredAt < endExclusive) { return false }
             }
 
             return true
@@ -101,7 +112,12 @@ public struct TransactionsView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.md) {
+                transactionSearchBar
                 filterControlsCard
+
+                if !store.duplicateCandidates.isEmpty {
+                    duplicateCandidatesSection
+                }
 
                 if let undoDesc = store.lastUndoDescription {
                     HStack {
@@ -130,12 +146,16 @@ public struct TransactionsView: View {
                 transactionsListCard
             }
             .padding(DaylightTheme.Spacing.md)
+            .padding(.bottom, DaylightTheme.Spacing.bottomNavInset)
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Transactions")
-        .searchable(text: $searchText, prompt: "Search merchant, description, Opal, Woolworths...")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.large)
+        #endif
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -174,10 +194,52 @@ public struct TransactionsView: View {
         }
     }
 
+    private var transactionSearchBar: some View {
+        HStack(spacing: DaylightTheme.Spacing.xs) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField(
+                "Search merchant, description, Opal, Woolworths...",
+                text: $searchText
+            )
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .font(DaylightTypography.body)
+        .padding(.horizontal, DaylightTheme.Spacing.md)
+        .frame(minHeight: 48)
+        .background(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.pill, style: .continuous)
+                .fill(
+                    colorScheme == .dark
+                        ? DaylightTheme.Glass.translucent
+                        : DaylightTheme.lightCream.opacity(0.9)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.pill, style: .continuous)
+                .stroke(DaylightTheme.Glass.border, lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Transaction search")
+    }
+
     // MARK: - Filter Controls Card
 
     private var filterControlsCard: some View {
-        DaylightCard(padding: 14) {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
             VStack(alignment: .leading, spacing: 10) {
                 if let drilldown = store.transactionCategoryDrilldown {
                     HStack {
@@ -186,7 +248,7 @@ public struct TransactionsView: View {
                         Button("Clear Drill-down") {
                             store.transactionCategoryDrilldown = nil
                         }
-                        .font(.caption.weight(.semibold))
+                        .font(DaylightTypography.captionMedium)
                     }
                 }
 
@@ -311,7 +373,7 @@ public struct TransactionsView: View {
                             DaylightDropdownPill(sortOrder.rawValue, icon: "arrow.up.and.down.text.horizontal")
                         }
 
-                        if selectedCategory != nil || selectedAccountId != nil || directionFilter != nil || dateRangeFilter != .all || !searchText.isEmpty {
+                        if selectedCategory != nil || store.transactionCategoryDrilldown != nil || selectedAccountId != nil || directionFilter != nil || dateRangeFilter != .all || !searchText.isEmpty {
                             Button("Reset") {
                                 selectedCategory = nil
                                 store.transactionCategoryDrilldown = nil
@@ -320,37 +382,54 @@ public struct TransactionsView: View {
                                 dateRangeFilter = .all
                                 searchText = ""
                             }
-                            .font(.caption.weight(.semibold))
+                            .font(DaylightTypography.captionMedium)
                         }
                     }
                 }
 
-                let netOutflow = filteredTransactions
-                    .filter { $0.direction == .debit && $0.kind != .ownAccountTransfer && $0.kind != .creditCardRepayment }
-                    .reduce(MoneyCents(0)) { $0 + $1.amountCents }
-                let netInflow = filteredTransactions
-                    .filter { $0.direction == .credit && $0.kind != .ownAccountTransfer }
-                    .reduce(MoneyCents(0)) { $0 + $1.amountCents }
+                let activeCategoryFilter = selectedCategory ?? store.transactionCategoryDrilldown
+                let netOutflow = filteredTransactions.reduce(MoneyCents(0)) { total, tx in
+                    guard tx.direction == .debit else { return total }
+                    return total + attributedAmount(for: tx, category: activeCategoryFilter)
+                }
+                let netInflow = filteredTransactions.reduce(MoneyCents(0)) { total, tx in
+                    guard tx.direction == .credit else { return total }
+                    return total + attributedAmount(for: tx, category: activeCategoryFilter)
+                }
 
                 HStack {
-                    Text("\(filteredTransactions.count) matching transaction\(filteredTransactions.count == 1 ? "" : "s")")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                    Text("\(filteredTransactions.count) transaction\(filteredTransactions.count == 1 ? "" : "s")")
+                        .font(DaylightTypography.captionMedium)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                     Spacer()
                     Text("Outflows: \(AustralianMoneyFormatter.format(cents: netOutflow)) • Inflows: \(AustralianMoneyFormatter.format(cents: netInflow))")
-                        .font(.caption.weight(.medium))
+                        .font(DaylightTypography.captionMedium)
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                 }
+
             }
         }
     }
 
+    private func attributedAmount(for transaction: TransactionRecord, category: AustralianCategory?) -> MoneyCents {
+        guard transaction.status == .posted || transaction.status == .refunded,
+              transaction.kind != .ownAccountTransfer,
+              transaction.kind != .creditCardRepayment else { return 0 }
+        guard let category else { return transaction.amountCents }
+        guard !transaction.splits.isEmpty else {
+            return transaction.category == category ? transaction.amountCents : 0
+        }
+        return transaction.splits
+            .filter { $0.category == category && !$0.excludeFromBudget }
+            .reduce(0) { $0 + $1.amountCents }
+    }
+
     private var bulkActionBanner: some View {
-        DaylightCard(padding: 12) {
+        DaylightCard(padding: DaylightTheme.Spacing.sm) {
             HStack(spacing: 12) {
                 Text("\(selectedIdsForBulk.count) selected")
-                    .font(.subheadline.weight(.semibold))
+                    .font(DaylightTypography.subheadlineMedium)
 
                 Menu {
                     ForEach(AustralianCategory.allCases) { cat in
@@ -375,7 +454,7 @@ public struct TransactionsView: View {
                     selectedIdsForBulk.removeAll()
                     isBulkSelectMode = false
                 }
-                .font(.footnote.weight(.semibold))
+                .font(DaylightTypography.captionMedium)
                 .buttonStyle(.borderedProminent)
                 .tint(DaylightTheme.accent)
                 .disabled(selectedIdsForBulk.isEmpty)
@@ -386,7 +465,7 @@ public struct TransactionsView: View {
     // MARK: - Transactions List Card
 
     private var transactionsListCard: some View {
-        DaylightCard {
+        DaylightCard(padding: 0) {
             if filteredTransactions.isEmpty {
                 DaylightEmptyState(
                     icon: "magnifyingglass",
@@ -396,105 +475,151 @@ public struct TransactionsView: View {
                 ) {
                     store.showingStatementImporter = true
                 }
+                .padding(DaylightTheme.Spacing.lg)
             } else {
-                LazyVStack(spacing: 0) {
-                    ForEach(filteredTransactions) { tx in
-                        let accountName = store.accounts.first(where: { $0.id == tx.accountId })?.nickname ?? "Account"
-                        HStack(spacing: 12) {
-                            if isBulkSelectMode {
-                                Button {
-                                    if selectedIdsForBulk.contains(tx.id) {
-                                        selectedIdsForBulk.remove(tx.id)
-                                    } else {
-                                        selectedIdsForBulk.insert(tx.id)
+                VStack(spacing: 0) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Transactions")
+                            .font(DaylightTypography.cardTitle)
+
+                        Spacer()
+
+                        Text("\(filteredTransactions.count) results")
+                            .font(DaylightTypography.captionMedium)
+                            .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
+                            .monospacedDigit()
+                    }
+                    .padding(.horizontal, DaylightTheme.Spacing.md)
+                    .padding(.vertical, DaylightTheme.Spacing.sm)
+
+                    Divider()
+
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredTransactions) { tx in
+                            let accountName = store.accounts.first(where: { $0.id == tx.accountId })?.nickname ?? "Account"
+
+                            HStack(spacing: DaylightTheme.Spacing.sm) {
+                                if isBulkSelectMode {
+                                    Button {
+                                        if selectedIdsForBulk.contains(tx.id) {
+                                            selectedIdsForBulk.remove(tx.id)
+                                        } else {
+                                            selectedIdsForBulk.insert(tx.id)
+                                        }
+                                    } label: {
+                                        Image(systemName: selectedIdsForBulk.contains(tx.id) ? "checkmark.circle.fill" : "circle")
+                                            .font(.title3)
+                                            .foregroundStyle(DaylightTheme.accent)
                                     }
-                                } label: {
-                                    Image(systemName: selectedIdsForBulk.contains(tx.id) ? "checkmark.circle.fill" : "circle")
-                                        .font(.title3)
-                                        .foregroundStyle(DaylightTheme.accent)
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(
+                                        selectedIdsForBulk.contains(tx.id)
+                                            ? "Deselect \(tx.merchantName)"
+                                            : "Select \(tx.merchantName)"
+                                    )
                                 }
-                                .buttonStyle(.plain)
-                            }
 
-                            Button {
-                                selectedTransactionForDetail = tx
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: tx.category.symbolName)
-                                        .foregroundStyle(tx.category.tintColor)
-                                        .frame(width: 38, height: 38)
-                                        .background(Circle().fill(tx.category.tintColor.opacity(0.14)))
+                                Image(systemName: tx.category.symbolName)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(tx.category.tintColor)
+                                    .frame(width: 36, height: 36)
+                                    .background(Circle().fill(tx.category.tintColor.opacity(0.14)))
 
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        HStack(spacing: 6) {
+                                Button {
+                                    selectedTransactionForDetail = tx
+                                } label: {
+                                    VStack(alignment: .leading, spacing: DaylightTheme.Spacing.xxs) {
+                                        HStack(spacing: DaylightTheme.Spacing.xxs) {
                                             Text(tx.merchantName)
-                                                .font(.subheadline.weight(.semibold))
-                                                .foregroundStyle(.primary)
+                                                .font(DaylightTypography.transactionTitle)
+                                                .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                                                .lineLimit(1)
+
                                             if tx.isRecurring {
                                                 Image(systemName: "repeat.circle.fill")
                                                     .font(.caption)
                                                     .foregroundStyle(DaylightTheme.accent)
                                                     .help("Recurring payment")
                                             }
-                                            if !tx.splits.isEmpty {
-                                                DaylightBadge("Split (\(tx.splits.count))", icon: "arrow.triangle.branch", tone: .neutral)
-                                            }
+
                                             if tx.classificationConfidence < 0.70 {
-                                                DaylightBadge("Uncertain Category", icon: "questionmark.circle", tone: .warning)
+                                                DaylightBadge("Review", icon: "questionmark.circle", tone: .warning)
+                                            }
+
+                                            if duplicateTransactionIds.contains(tx.id) {
+                                                DaylightBadge("Duplicate", icon: "doc.on.doc", tone: .warning)
                                             }
                                         }
 
-                                        Text("\(tx.category.displayName) • \(accountName) • \(tx.paymentRail ?? tx.source.displayName)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-
-                                        Text("\(AustralianDateHelper.formatDateTime(tx.occurredAt, timeZoneId: store.profile.timeZoneId)) • \(tx.status.displayName) • \(tx.source.displayName)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-
-                                        if !tx.userNote.isEmpty {
-                                            Text("Note: \(tx.userNote)")
-                                                .font(.caption2)
-                                                .foregroundStyle(DaylightTheme.accent)
-                                        }
+                                        Text("\(tx.category.displayName) • \(accountName)")
+                                            .font(DaylightTypography.transactionMetadata)
+                                            .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
+                                            .lineLimit(1)
                                     }
-
-                                    Spacer()
-
-                                    VStack(alignment: .trailing, spacing: 3) {
-                                        Text(
-                                            AustralianMoneyFormatter.format(
-                                                cents: tx.direction == .debit ? -tx.amountCents : tx.amountCents,
-                                                showPlusForPositive: true
-                                            )
-                                        )
-                                        .font(.subheadline.weight(.bold))
-                                        .monospacedDigit()
-                                        .foregroundStyle(tx.direction == .credit ? DaylightTheme.positive : .primary)
-
-                                        Text(tx.kind.displayName)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-
-                                        if tx.excludeFromBudget {
-                                            Text("Excluded from budget")
-                                                .font(.caption2.weight(.medium))
-                                                .foregroundStyle(DaylightTheme.warning)
-                                        }
-                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.vertical, 10)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Shows transaction details")
+
+                                Text(
+                                    AustralianMoneyFormatter.format(
+                                        cents: tx.direction == .debit ? -tx.amountCents : tx.amountCents,
+                                        showPlusForPositive: true
+                                    )
+                                )
+                                .font(DaylightTypography.transactionAmount)
+                                .foregroundStyle(tx.direction == .credit ? DaylightTheme.positive : DaylightTheme.primaryText(for: colorScheme))
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, DaylightTheme.Spacing.md)
+                            .padding(.vertical, DaylightTheme.Spacing.xs)
+
+                            Divider()
+                                .padding(.leading, isBulkSelectMode ? 118 : 78)
                         }
-                        Divider()
                     }
                 }
             }
         }
     }
+
+    private var duplicateCandidatesSection: some View {
+        VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
+            HStack(spacing: DaylightTheme.Spacing.xs) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(DaylightTheme.warning)
+                Text("Potential Duplicate Transactions (\(store.duplicateCandidates.count))")
+                    .font(DaylightTypography.sectionTitle)
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                Spacer()
+            }
+
+            Text("Daylight detected potential duplicate transactions. Please review them below. Transactions are never deleted automatically.")
+                .font(DaylightTypography.caption)
+                .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
+
+            ForEach(store.duplicateCandidates) { group in
+                DuplicateCandidateCard(
+                    group: group,
+                    store: store,
+                    onInspect: {
+                        selectedTransactionForDetail = group.duplicateTransaction
+                    }
+                )
+            }
+        }
+        .padding(DaylightTheme.Spacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.lg)
+                .fill(DaylightTheme.warning.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.lg)
+                        .stroke(DaylightTheme.warning.opacity(0.2), lineWidth: 1)
+                )
+        )
+    }
 }
+
 
 // MARK: - Transaction Detail & Split Editor Sheet
 
@@ -520,6 +645,7 @@ public struct TransactionDetailSheet: View {
     @State private var splitPart2Category: AustralianCategory = .shoppingRetail
     @State private var showingDeleteConfirmation: Bool = false
     @State private var errorMessage: String? = nil
+    @State private var applyToUnconfirmed: Bool = true
 
     public var body: some View {
         NavigationStack {
@@ -542,6 +668,15 @@ public struct TransactionDetailSheet: View {
                     LabeledContent("Original Bank Description", value: transaction.rawDescription)
                     LabeledContent("Data Source", value: transaction.source.displayName)
                 }
+
+                TransactionIntelligenceSectionView(
+                    transaction: transaction,
+                    merchantName: $merchantName,
+                    direction: $direction,
+                    category: $category,
+                    kind: $kind,
+                    userRules: store.merchantRules
+                )
 
                 Section("Merchant, Category & Rule") {
                     TextField("Merchant or Payee Name", text: $merchantName)
@@ -584,14 +719,6 @@ public struct TransactionDetailSheet: View {
                             }
                         }
                     }
-
-                    Button {
-                        store.showingCategoriesManagerSheet = true
-                    } label: {
-                        Label("Manage Custom Categories…", systemImage: "tag")
-                            .font(.caption.weight(.semibold))
-                    }
-
                     HStack {
                         Text("Rule")
                         Spacer()
@@ -633,6 +760,9 @@ public struct TransactionDetailSheet: View {
                     }
                     Toggle("Exclude from Flexible Budget Calculations", isOn: $excludeFromBudget)
                     Toggle("Always categorise '\(merchantName)' as \(category.displayName) for future imports", isOn: $saveMerchantRuleForFuture)
+                    if category != transaction.category {
+                        Toggle("Apply correction to existing unconfirmed transactions", isOn: $applyToUnconfirmed)
+                    }
                 }
 
                 Section("Notes") {
@@ -648,12 +778,12 @@ public struct TransactionDetailSheet: View {
                             #if os(iOS)
                             .keyboardType(.decimalPad)
                             #endif
-                        Picker("First Split Category", selection: $splitPart1Category) {
+                        Picker("1st Split Category", selection: $splitPart1Category) {
                             ForEach(AustralianCategory.allCases) { cat in
                                 Text(cat.displayName).tag(cat)
                             }
                         }
-                        Picker("Remaining Balance Category", selection: $splitPart2Category) {
+                        Picker("2nd Split Category", selection: $splitPart2Category) {
                             ForEach(AustralianCategory.allCases) { cat in
                                 Text(cat.displayName).tag(cat)
                             }
@@ -778,19 +908,136 @@ public struct TransactionDetailSheet: View {
         updated.category = category
         updated.kind = kind
         updated.status = status
-        if !selectedCustomCategoryName.isEmpty && !userNote.contains("[\(selectedCustomCategoryName)]") {
-            updated.userNote = userNote.isEmpty ? "[\(selectedCustomCategoryName)]" : "[\(selectedCustomCategoryName)] \(userNote)"
+        let cleanedNote = store.customCategories(includeArchived: true)
+            .reduce(userNote) { note, customCategory in
+                note.replacingOccurrences(of: "[\(customCategory.name)]", with: "")
+            }
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selectedCustomCategoryName.isEmpty {
+            updated.userNote = cleanedNote.isEmpty ? "[\(selectedCustomCategoryName)]" : "[\(selectedCustomCategoryName)] \(cleanedNote)"
         } else {
-            updated.userNote = userNote
+            updated.userNote = cleanedNote
         }
         updated.excludeFromBudget = excludeFromBudget
         updated.splits = splits
 
         do {
-            try store.updateTransaction(updated, createMerchantRuleForFuture: saveMerchantRuleForFuture)
+            try store.updateTransaction(
+                updated,
+                createMerchantRuleForFuture: saveMerchantRuleForFuture || applyToUnconfirmed,
+                applyCategoryToUnconfirmed: applyToUnconfirmed && category != transaction.category
+            )
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+}
+
+// MARK: - Transaction Intelligence Section Subview
+
+private struct TransactionIntelligenceSectionView: View {
+    let transaction: TransactionRecord
+    @Binding var merchantName: String
+    @Binding var direction: TransactionDirection
+    @Binding var category: AustralianCategory
+    @Binding var kind: TransactionKind
+    let userRules: [MerchantRule]
+
+    private var recognition: RecognizedMerchant {
+        let rawTarget = merchantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? transaction.rawDescription
+            : merchantName
+        return MerchantRecognitionService.shared.recognise(rawTarget)
+    }
+
+    private var classification: IntelligentClassificationResult {
+        let rawTarget = merchantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? transaction.rawDescription
+            : merchantName
+        return IntelligentCategorisationEngine.shared.classify(
+            rawDescription: rawTarget,
+            direction: direction,
+            isCreditCardAccount: false,
+            userRules: userRules
+        )
+    }
+
+    private var badgeTone: FinancialBadgeTone {
+        if classification.confidence >= 0.85 {
+            return .positive
+        } else if classification.confidence >= 0.70 {
+            return .neutral
+        } else {
+            return .warning
+        }
+    }
+
+    private var confidenceColor: Color {
+        if classification.confidence >= 0.85 {
+            return DaylightTheme.positive
+        } else if classification.confidence >= 0.70 {
+            return DaylightTheme.accent
+        } else {
+            return DaylightTheme.warning
+        }
+    }
+
+    var body: some View {
+        Section("Transaction Intelligence") {
+            HStack {
+                Text("Recognised Merchant")
+                Spacer()
+                Text(recognition.recognisedName)
+                    .foregroundStyle(.secondary)
+                if recognition.recognisedName != merchantName && !recognition.isUnknown {
+                    Button("Apply") {
+                        merchantName = recognition.recognisedName
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            HStack {
+                Text("Suggested Category")
+                Spacer()
+                DaylightBadge(
+                    classification.suggestedCategory.displayName,
+                    icon: classification.suggestedCategory.symbolName,
+                    tone: badgeTone
+                )
+                if classification.suggestedCategory != category {
+                    Button("Use Suggestion") {
+                        category = classification.suggestedCategory
+                        kind = classification.suggestedKind
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            HStack {
+                Text("Confidence Score")
+                Spacer()
+                Text("\(Int(classification.confidence * 100))%")
+                    .font(.caption.weight(.bold).monospacedDigit())
+                    .foregroundStyle(confidenceColor)
+            }
+
+            LabeledContent("Source", value: classification.source.displayName)
+            LabeledContent("Reason", value: classification.reason)
+
+            if classification.isManualReviewRecommended {
+                HStack(spacing: DaylightTheme.Spacing.xs) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(DaylightTheme.warning)
+                    Text("Manual review recommended due to lower confidence.")
+                        .font(DaylightTypography.caption)
+                        .foregroundStyle(DaylightTheme.warning)
+                }
+            }
         }
     }
 }
@@ -821,15 +1068,15 @@ public struct ManualTransactionSheet: View {
                 Section("Transaction Details") {
                     TextField("Merchant or Payee (e.g. Woolworths, Opal, Rent)", text: $merchantName)
                         .onChange(of: merchantName) { _, newValue in
-                            let inferred = FinancialCalculationEngine.classifyAustralianTransaction(
+                            let classified = IntelligentCategorisationEngine.shared.classify(
                                 rawDescription: newValue,
                                 direction: direction,
                                 isCreditCardAccount: false,
-                                userMerchantRules: store.merchantRules
+                                userRules: store.merchantRules
                             )
-                            if inferred.confidence >= 0.85 {
-                                category = inferred.category
-                                kind = inferred.kind
+                            if classified.confidence >= 0.70 {
+                                category = classified.suggestedCategory
+                                kind = classified.suggestedKind
                             }
                         }
 
@@ -1031,6 +1278,12 @@ public struct StatementImportSheet: View {
     @State private var previewRows: [ParsedCSVRowPreview] = []
     @State private var completedJob: ImportJobRecord? = nil
     @State private var errorMessage: String? = nil
+    @State private var repairingRow: ParsedCSVRowPreview? = nil
+    @State private var repairDateText: String = ""
+    @State private var repairDescriptionText: String = ""
+    @State private var repairAmountText: String = ""
+    @State private var repairDirection: TransactionDirection = .debit
+    @State private var repairErrorMessage: String? = nil
 
     private let dateFormatOptions = [
         "Auto-Detect AU (DD/MM/YYYY & ISO)",
@@ -1098,6 +1351,9 @@ public struct StatementImportSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
                 }
+            }
+            .sheet(item: $repairingRow) { row in
+                rejectedRowRepairSheet(row)
             }
             .onAppear {
                 if let firstAcct = store.accounts.first?.id {
@@ -1257,7 +1513,7 @@ public struct StatementImportSheet: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(DaylightTheme.cautionRed)
                                     Button("Fix & Retry Row") {
-                                        repairRejectedRow(row)
+                                        beginRejectedRowRepair(row)
                                     }
                                     .font(.caption2.weight(.semibold))
                                     .buttonStyle(.bordered)
@@ -1372,12 +1628,115 @@ public struct StatementImportSheet: View {
         }
     }
 
-    private func repairRejectedRow(_ rejectedRow: ParsedCSVRowPreview) {
-        let todayFormatted = AustralianDateHelper.formatISODate(store.referenceDate, timeZoneId: store.profile.timeZoneId)
-        let cleanedDesc = rejectedRow.parsedDescription.isEmpty ? "REPAIRED STATEMENT ENTRY" : rejectedRow.parsedDescription
-        let replacementLine = "\(todayFormatted),\(cleanedDesc),-15.00,2400.00"
-        csvInputText = csvInputText.replacingOccurrences(of: rejectedRow.rawLine, with: replacementLine)
-        refreshPreview()
+    private func beginRejectedRowRepair(_ row: ParsedCSVRowPreview) {
+        repairingRow = row
+        repairDateText = ""
+        repairDescriptionText = row.parsedDescription
+        repairAmountText = row.parsedAmountCents.map { AustralianMoneyFormatter.format(cents: $0) } ?? ""
+        repairDirection = row.parsedDirection
+        repairErrorMessage = nil
+    }
+
+    private func rejectedRowRepairSheet(_ row: ParsedCSVRowPreview) -> some View {
+        NavigationStack {
+            Form {
+                Section("Corrected Values") {
+                    TextField("Date (DD/MM/YYYY)", text: $repairDateText)
+                    TextField("Description", text: $repairDescriptionText)
+                    TextField("Amount (AUD)", text: $repairAmountText)
+                        #if os(iOS)
+                        .keyboardType(.decimalPad)
+                        #endif
+                    Picker("Direction", selection: $repairDirection) {
+                        Text("Expense").tag(TransactionDirection.debit)
+                        Text("Income").tag(TransactionDirection.credit)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                if let repairErrorMessage {
+                    Section {
+                        Text(repairErrorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                    }
+                }
+
+                Section {
+                    Text("The original CSV row is preserved until you confirm this repair.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Repair Row #\(row.rowNumber)")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { repairingRow = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") { applyRejectedRowRepair(row) }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+
+    private func applyRejectedRowRepair(_ row: ParsedCSVRowPreview) {
+        let trimmedDescription = repairDescriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let date = FinancialCalculationEngine.parseAustralianBankDate(
+            repairDateText,
+            timeZoneId: store.profile.timeZoneId
+        ) else {
+            repairErrorMessage = "Enter a valid date such as 14/10/2026."
+            return
+        }
+        guard let cents = AustralianMoneyFormatter.parseToCents(repairAmountText), cents > 0 else {
+            repairErrorMessage = "Enter a positive monetary amount."
+            return
+        }
+        guard !trimmedDescription.isEmpty else {
+            repairErrorMessage = "Enter a transaction description."
+            return
+        }
+
+        let isCreditCard = store.accounts.first(where: { $0.id == targetAccountId })?.accountType == .creditCard
+        let classification = FinancialCalculationEngine.classifyAustralianTransaction(
+            rawDescription: trimmedDescription,
+            direction: repairDirection,
+            isCreditCardAccount: isCreditCard,
+            userMerchantRules: store.merchantRules
+        )
+        let fingerprint = FinancialCalculationEngine.makeReconciliationFingerprint(
+            accountId: targetAccountId,
+            date: date,
+            amountCents: cents,
+            direction: repairDirection,
+            rawDescription: trimmedDescription,
+            sourceTransactionId: nil,
+            occurrenceIndexInBatch: row.rowNumber
+        )
+        let repaired = ParsedCSVRowPreview(
+            id: row.id,
+            rowNumber: row.rowNumber,
+            rawLine: row.rawLine,
+            parsedDate: date,
+            parsedDescription: trimmedDescription,
+            parsedAmountCents: cents,
+            parsedDirection: repairDirection,
+            inferredCategory: classification.category,
+            inferredKind: classification.kind,
+            classificationConfidence: classification.confidence,
+            fingerprint: fingerprint,
+            isDuplicate: store.transactions.contains { $0.reconciliationFingerprint == fingerprint },
+            validationError: nil
+        )
+        if let index = previewRows.firstIndex(where: { $0.id == row.id }) {
+            previewRows[index] = repaired
+        }
+        repairingRow = nil
     }
 
     private func loadSampleCSV() {
@@ -1403,7 +1762,11 @@ public struct StatementImportSheet: View {
 
     private func commitImport() {
         do {
-            let key = "import:\(fileName):\(csvInputText.hashValue):\(Date().timeIntervalSince1970)"
+            let key = FinancialCalculationEngine.makeStatementImportIdempotencyKey(
+                accountId: targetAccountId,
+                fileName: fileName,
+                csvContent: csvInputText
+            )
             completedJob = try store.commitCSVStatementImport(
                 fileName: fileName,
                 targetAccountId: targetAccountId,

@@ -1,10 +1,22 @@
 import Foundation
+import os
 import UserNotifications
 
 /// Schedules and generates local Australian financial notifications from real calculated figures.
 /// Respects user notification permissions, quiet hours, local Australian time zones, lock-screen
 /// privacy masking, and deterministic request identifiers to prevent duplicate firing on restarts.
 public enum DaylightNotificationScheduler {
+    private static let logger = Logger(subsystem: "com.daylight.money", category: "notifications")
+
+    public enum AuthorizationState: Equatable, Sendable {
+        case notDetermined
+        case authorized
+        case provisional
+        case denied
+        case restricted
+        case ephemeral
+        case unavailable
+    }
 
     public struct GeneratedNotificationPayload: Equatable, Sendable {
         public let deterministicIdentifier: String
@@ -13,6 +25,49 @@ public enum DaylightNotificationScheduler {
         public let lockScreenMaskedBody: String
         public let categoryTag: String
         public let targetSectionRawValue: String
+        public let relatedEntityID: String?
+        public let eventIdentifier: String?
+
+        public init(
+            deterministicIdentifier: String,
+            title: String,
+            body: String,
+            lockScreenMaskedBody: String,
+            categoryTag: String,
+            targetSectionRawValue: String,
+            relatedEntityID: String? = nil,
+            eventIdentifier: String? = nil
+        ) {
+            self.deterministicIdentifier = deterministicIdentifier
+            self.title = title
+            self.body = body
+            self.lockScreenMaskedBody = lockScreenMaskedBody
+            self.categoryTag = categoryTag
+            self.targetSectionRawValue = targetSectionRawValue
+            self.relatedEntityID = relatedEntityID
+            self.eventIdentifier = eventIdentifier
+        }
+    }
+
+    public static func authorizationState() async -> AuthorizationState {
+        #if os(iOS)
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .notDetermined: return .notDetermined
+        case .authorized: return .authorized
+        case .provisional: return .provisional
+        case .denied: return .denied
+        case .ephemeral: return .ephemeral
+        @unknown default: return .unavailable
+        }
+        #else
+        return .unavailable
+        #endif
+    }
+
+    public static func requestAuthorization() async throws -> AuthorizationState {
+        let center = UNUserNotificationCenter.current()
+        _ = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+        return await authorizationState()
     }
 
     /// Generates the daily evening allowance summary from actual calculated `DailyAllowanceSummary` data.
@@ -35,8 +90,16 @@ public enum DaylightNotificationScheduler {
         let remainingCents = summary.todaysRemainingAllowanceCents
 
         let fullBody: String
-        if summary.flexibleSpentTodayCents == 0 {
-            fullBody = "Your daily allowance is \(startingFormatted). No flexible spending recorded today—full allowance remaining."
+        if summary.totalFlexibleBudgetForPeriodCents == 0 &&
+            summary.periodTakeHomeIncomeCents == 0 &&
+            summary.flexibleSpentTodayCents == 0 {
+            fullBody = "No spending recorded today ($0.00). Add your pay cycle or a transaction whenever you're ready to track your daily Safe-to-Spend."
+        } else if summary.flexibleSpentTodayCents == 0 {
+            fullBody = "Your daily allowance is \(startingFormatted). No spending today—full allowance remains."
+        } else if summary.flexibleSpentTodayCents < 0 {
+            let refundFormatted = AustralianMoneyFormatter.format(cents: abs(summary.flexibleSpentTodayCents))
+            let remainingFormatted = AustralianMoneyFormatter.format(cents: max(0, remainingCents))
+            fullBody = "Your daily allowance is \(startingFormatted). Net refunds of \(refundFormatted) today leave \(remainingFormatted) safe to spend."
         } else if remainingCents < 0 {
             let overByFormatted = AustralianMoneyFormatter.format(cents: abs(remainingCents))
             fullBody = "Your daily allowance was \(startingFormatted). You spent \(spentFormatted), which is \(overByFormatted) over your allowance."
@@ -54,6 +117,31 @@ public enum DaylightNotificationScheduler {
             lockScreenMaskedBody: maskedBody,
             categoryTag: "daily_summary",
             targetSectionRawValue: "overview"
+        )
+    }
+
+    /// Convenience overload used by test harnesses and direct view models.
+    public static func buildDailySummaryContent(
+        summary: DailyAllowanceSummary,
+        profile: UserProfile,
+        preferences: NotificationPreferences? = nil
+    ) -> GeneratedNotificationPayload {
+        let resolvedPreferences = preferences ?? NotificationPreferences(
+            dailySummaryEnabled: true,
+            dailySummaryHour: 19,
+            budgetThresholdAlertsEnabled: true,
+            upcomingBillRemindersEnabled: true,
+            paydayRemindersEnabled: true,
+            recurringChangeAlertsEnabled: true,
+            unusualSpendingAlertsEnabled: true,
+            hideExactAmountsInPreviews: false
+        )
+        return buildDailyEveningSummary(
+            tenantId: profile.tenantId,
+            referenceDate: summary.periodStart,
+            timeZoneId: profile.timeZoneId,
+            summary: summary,
+            preferences: resolvedPreferences
         )
     }
 
@@ -84,7 +172,9 @@ public enum DaylightNotificationScheduler {
                         body: preferences.hideExactAmountsInPreviews ? masked : fullBody,
                         lockScreenMaskedBody: masked,
                         categoryTag: "budget_alert",
-                        targetSectionRawValue: "budgets"
+                        targetSectionRawValue: "budgets",
+                        relatedEntityID: item.category.rawValue,
+                        eventIdentifier: "over"
                     )
                 )
             } else if item.percentageUsed >= 0.85 {
@@ -99,7 +189,9 @@ public enum DaylightNotificationScheduler {
                         body: preferences.hideExactAmountsInPreviews ? masked : fullBody,
                         lockScreenMaskedBody: masked,
                         categoryTag: "budget_alert",
-                        targetSectionRawValue: "budgets"
+                        targetSectionRawValue: "budgets",
+                        relatedEntityID: item.category.rawValue,
+                        eventIdentifier: "threshold"
                     )
                 )
             }
@@ -127,7 +219,8 @@ public enum DaylightNotificationScheduler {
                 let amountFormatted = AustralianMoneyFormatter.format(cents: bill.expectedAmountCents)
                 let statusLabel = bill.isConfirmedByUser ? "Confirmed" : "Estimated"
                 let fullBody = "\(statusLabel) \(bill.merchantName) payment of \(amountFormatted) is due on \(dateFormatted) via \(bill.paymentRail)."
-                let masked = "An upcoming recurring bill (\(bill.merchantName)) is due on \(dateFormatted)."
+                let masked = "An upcoming recurring payment is due on \(dateFormatted)."
+                let occurrenceKey = AustralianDateHelper.formatISODate(bill.nextExpectedDate, timeZoneId: timeZoneId)
                 reminders.append(
                     GeneratedNotificationPayload(
                         deterministicIdentifier: "daylight.bill_due.\(tenantId).\(bill.id.uuidString).\(dateFormatted)",
@@ -135,7 +228,9 @@ public enum DaylightNotificationScheduler {
                         body: preferences.hideExactAmountsInPreviews ? masked : fullBody,
                         lockScreenMaskedBody: masked,
                         categoryTag: "upcoming_bill",
-                        targetSectionRawValue: "bills"
+                        targetSectionRawValue: "bills",
+                        relatedEntityID: bill.id.uuidString,
+                        eventIdentifier: occurrenceKey
                     )
                 )
             }
@@ -161,74 +256,249 @@ public enum DaylightNotificationScheduler {
         return clamped
     }
 
-    /// Requests OS notification authorization and schedules the daily summary notification in the user's Australian time zone.
+    /// Removes all pending and delivered Daylight OS notifications across all tenants (e.g. on logout, reset, or workspace switch).
+    public static func clearAllScheduledOSNotifications() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let pendingDaylightIds = pending.map(\.identifier).filter { $0.hasPrefix("daylight.") }
+        if !pendingDaylightIds.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: pendingDaylightIds)
+        }
+        let delivered = await center.deliveredNotifications()
+        let deliveredDaylightIds = delivered.map { $0.request.identifier }.filter { $0.hasPrefix("daylight.") }
+        if !deliveredDaylightIds.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: deliveredDaylightIds)
+        }
+    }
+
+    /// Requests OS notification authorization and schedules non-repeating, date-specific daily summary notifications
+    /// in the user's Australian time zone so yesterday's spend or another tenant's numbers never repeat on future zero-spend days.
     public static func syncScheduledOSNotifications(
         tenantId: String,
         referenceDate: Date,
         profile: UserProfile,
         summary: DailyAllowanceSummary,
-        preferences: NotificationPreferences
+        preferences: NotificationPreferences,
+        accounts: [FinancialAccount] = [],
+        transactions: [TransactionRecord] = [],
+        fixedCommitments: [FixedCommitment] = [],
+        categoryBudgets: [CategoryBudget] = [],
+        recurringPredictions: [RecurringPaymentPrediction] = [],
+        isDemoMode: Bool = false
     ) async -> Bool {
         let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-
-        if settings.authorizationStatus == .notDetermined {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-        }
-
-        let refreshedSettings = await center.notificationSettings()
-        guard refreshedSettings.authorizationStatus == .authorized || refreshedSettings.authorizationStatus == .provisional else {
-            return false
-        }
-
-        // Remove any stale daily summary requests for this tenant before scheduling updated calculation
         let pending = await center.pendingNotificationRequests()
-        let staleIds = pending
+        let tenantPendingIDs = pending
             .map(\.identifier)
-            .filter { $0.hasPrefix("daylight.daily_summary.\(tenantId)") }
-        if !staleIds.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: staleIds)
-        }
+            .filter { $0.hasPrefix("daylight.") && $0.contains(".\(tenantId).") }
 
-        guard preferences.dailySummaryEnabled else {
+        guard !isDemoMode, preferences.notificationsEnabled else {
+            if !tenantPendingIDs.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: tenantPendingIDs)
+            }
+            return true
+        }
+        guard !Task.isCancelled else { return false }
+
+        // Do not schedule empty notifications when no budget/income is configured and no spending occurred
+        let hasConfiguredBudgetOrIncome = summary.totalFlexibleBudgetForPeriodCents > 0 || summary.periodTakeHomeIncomeCents > 0
+        guard hasConfiguredBudgetOrIncome || summary.flexibleSpentTodayCents != 0 else {
+            if !tenantPendingIDs.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: tenantPendingIDs)
+            }
             return true
         }
 
-        let payload = buildDailyEveningSummary(
+        let currentAuthorization = await authorizationState()
+        guard currentAuthorization == .authorized || currentAuthorization == .provisional else {
+            logger.info("Notification scheduling skipped because authorization is unavailable.")
+            return false
+        }
+
+        let cal = AustralianDateHelper.calendar(for: profile.timeZoneId)
+        let tz = AustralianDateHelper.timeZone(for: profile.timeZoneId)
+        let targetHour = effectiveSummaryHour(requestedHour: preferences.dailySummaryHour)
+        let startOfToday = cal.startOfDay(for: referenceDate)
+
+        var desiredRequests: [UNNotificationRequest] = []
+
+        // Schedule date-specific (repeats: false) notifications for today (if before targetHour) and up to 7 upcoming days.
+        // Because repeats is false and each future day computes its own fresh DailyAllowanceSummary, today's spending
+        // is NEVER repeated on future days when spending is $0.00.
+        let maxDayOffset = hasConfiguredBudgetOrIncome ? 7 : 0
+        if preferences.dailySummaryEnabled {
+            for dayOffset in 0...maxDayOffset {
+            guard let targetDayStart = cal.date(byAdding: .day, value: dayOffset, to: startOfToday),
+                  let fireDate = cal.date(bySettingHour: targetHour, minute: 0, second: 0, of: targetDayStart) else {
+                continue
+            }
+
+            // Skip today's trigger if today's summary hour has already passed
+            if fireDate <= referenceDate {
+                continue
+            }
+
+            let daySummary: DailyAllowanceSummary
+            if dayOffset == 0 {
+                daySummary = summary
+            } else {
+                daySummary = FinancialCalculationEngine.calculateDailyAllowanceSummary(
+                    referenceDate: fireDate,
+                    profile: profile,
+                    accounts: accounts,
+                    transactions: transactions,
+                    fixedCommitments: fixedCommitments,
+                    categoryBudgets: categoryBudgets
+                )
+            }
+
+            let payload = buildDailyEveningSummary(
+                tenantId: tenantId,
+                referenceDate: fireDate,
+                timeZoneId: profile.timeZoneId,
+                summary: daySummary,
+                preferences: preferences
+            )
+
+            var dateComponents = cal.dateComponents([.year, .month, .day], from: fireDate)
+            dateComponents.timeZone = tz
+            dateComponents.hour = targetHour
+            dateComponents.minute = 0
+            dateComponents.second = 0
+
+            let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: false)
+                desiredRequests.append(makeRequest(payload: payload, trigger: trigger, tenantId: tenantId))
+            }
+        }
+
+        let budgetPayloads = preferences.budgetThresholdAlertsEnabled ? buildCategoryBudgetAlerts(
             tenantId: tenantId,
             referenceDate: referenceDate,
             timeZoneId: profile.timeZoneId,
-            summary: summary,
+            categoryProgress: categoryBudgets.isEmpty ? [] : FinancialCalculationEngine.calculateCategoryBudgetsProgress(
+                referenceDate: referenceDate,
+                profile: profile,
+                transactions: transactions,
+                categoryBudgets: categoryBudgets
+            ),
             preferences: preferences
-        )
+        ) : []
+        if !budgetPayloads.isEmpty {
+            let budgetDate = nextNotificationDate(
+                after: referenceDate,
+                hour: targetHour,
+                calendar: cal
+            )
+            var components = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: budgetDate)
+            components.timeZone = tz
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            desiredRequests.append(contentsOf: budgetPayloads.map {
+                makeRequest(payload: $0, trigger: trigger, tenantId: tenantId)
+            })
+        }
 
+        let billPayloads = preferences.upcomingBillRemindersEnabled ? buildUpcomingBillReminders(
+            tenantId: tenantId,
+            referenceDate: referenceDate,
+            timeZoneId: profile.timeZoneId,
+            recurringPredictions: recurringPredictionsForScheduling(
+                from: transactions,
+                predictions: recurringPredictions
+            ),
+            preferences: preferences
+        ) : []
+        for payload in billPayloads {
+            guard let bill = recurringPredictions.first(where: { $0.id.uuidString == payload.relatedEntityID }) else {
+                continue
+            }
+            guard let fireDate = cal.date(bySettingHour: 9, minute: 0, second: 0, of: cal.startOfDay(for: bill.nextExpectedDate)),
+                  fireDate > referenceDate else {
+                continue
+            }
+            var components = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
+            components.timeZone = tz
+            desiredRequests.append(makeRequest(
+                payload: payload,
+                trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false),
+                tenantId: tenantId
+            ))
+        }
+
+        let existingDaylight = pending.filter { $0.identifier.hasPrefix("daylight.") && $0.identifier.contains(".\(tenantId).") }
+        let desiredByID = Dictionary(uniqueKeysWithValues: desiredRequests.map { ($0.identifier, $0) })
+        let obsolete = existingDaylight
+            .filter { !desiredByID.keys.contains($0.identifier) }
+            .map(\.identifier)
+        if !obsolete.isEmpty {
+            guard !Task.isCancelled else { return false }
+            center.removePendingNotificationRequests(withIdentifiers: obsolete)
+        }
+
+        do {
+            for request in desiredRequests {
+                guard !Task.isCancelled else { return false }
+                if let existing = existingDaylight.first(where: { $0.identifier == request.identifier }),
+                   existing.content.title == request.content.title,
+                   existing.content.body == request.content.body {
+                    continue
+                }
+                try await center.add(request)
+            }
+        } catch {
+            logger.error("Notification scheduling failed for the current reconciliation.")
+            return false
+        }
+        return true
+    }
+
+    private static func makeRequest(
+        payload: GeneratedNotificationPayload,
+        trigger: UNNotificationTrigger,
+        tenantId: String
+    ) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = payload.title
         content.body = payload.body
         content.sound = .default
-        content.userInfo = [
+        var userInfo: [String: String] = [
             "targetSection": payload.targetSectionRawValue,
             "tenantId": tenantId,
             "categoryTag": payload.categoryTag
         ]
+        if let relatedEntityID = payload.relatedEntityID {
+            userInfo["relatedEntityID"] = relatedEntityID
+        }
+        if let eventIdentifier = payload.eventIdentifier {
+            userInfo["eventIdentifier"] = eventIdentifier
+        }
+        content.userInfo = userInfo
+        return UNNotificationRequest(identifier: payload.deterministicIdentifier, content: content, trigger: trigger)
+    }
 
-        var dateComponents = DateComponents()
-        dateComponents.timeZone = AustralianDateHelper.timeZone(for: profile.timeZoneId)
-        dateComponents.hour = effectiveSummaryHour(requestedHour: preferences.dailySummaryHour)
-        dateComponents.minute = 0
+    private static func nextNotificationDate(
+        after date: Date,
+        hour: Int,
+        calendar: Calendar
+    ) -> Date {
+        let start = calendar.startOfDay(for: date)
+        let today = calendar.date(bySettingHour: hour, minute: 0, second: 0, of: start) ?? date
+        return today > date
+            ? today
+            : (calendar.date(byAdding: .day, value: 1, to: start).flatMap {
+                calendar.date(bySettingHour: hour, minute: 0, second: 0, of: $0)
+            } ?? date)
+    }
 
-        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
-        let request = UNNotificationRequest(
-            identifier: payload.deterministicIdentifier,
-            content: content,
-            trigger: trigger
-        )
-
-        do {
-            try await center.add(request)
-            return true
-        } catch {
-            return false
+    private static func recurringPredictionsForScheduling(
+        from transactions: [TransactionRecord],
+        predictions: [RecurringPaymentPrediction]
+    ) -> [RecurringPaymentPrediction] {
+        predictions.filter { prediction in
+            !prediction.isDismissed &&
+            !transactions.contains {
+                $0.occurredAt >= prediction.nextExpectedDate &&
+                $0.merchantName.caseInsensitiveCompare(prediction.merchantName) == .orderedSame
+            }
         }
     }
 }

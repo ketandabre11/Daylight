@@ -83,7 +83,7 @@ public struct InsightsAnalyticsView: View {
 
     private var topMerchants: [MerchantSpendPoint] {
         var map: [String: (cents: MoneyCents, count: Int)] = [:]
-        for tx in store.transactions where tx.direction == .debit && tx.kind != .ownAccountTransfer && tx.kind != .creditCardRepayment {
+        for tx in store.transactions where tx.status != .reversed && !tx.excludeFromBudget && tx.direction == .debit && tx.kind != .ownAccountTransfer && tx.kind != .creditCardRepayment {
             let cur = map[tx.merchantName] ?? (0, 0)
             map[tx.merchantName] = (cur.cents + tx.amountCents, cur.count + 1)
         }
@@ -96,20 +96,22 @@ public struct InsightsAnalyticsView: View {
     private var recurringVsDiscretionaryTuple: (recurringCents: MoneyCents, discretionaryCents: MoneyCents) {
         var rec: MoneyCents = 0
         var disc: MoneyCents = 0
-        for tx in store.transactions where tx.direction == .debit && tx.kind != .ownAccountTransfer && tx.kind != .creditCardRepayment {
+        for tx in store.transactions {
+            let netAll = FinancialCalculationEngine.netSpendContributionCents(for: tx, includeFixedCategories: true)
+            guard netAll != 0 else { continue }
             if tx.isRecurring || tx.category.isDefaultFixedCommitment {
-                rec += tx.amountCents
+                rec += netAll
             } else {
-                disc += tx.amountCents
+                disc += netAll
             }
         }
-        return (rec, disc)
+        return (max(0, rec), max(0, disc))
     }
 
     private var fySummary: (label: String, incomeCents: MoneyCents, spendCents: MoneyCents) {
         let bounds = AustralianDateHelper.financialYearBounds(for: store.referenceDate, timeZoneId: store.profile.timeZoneId)
         let fyTxs = store.transactions.filter { $0.occurredAt >= bounds.start && $0.occurredAt <= bounds.end }
-        let inc = fyTxs.filter { $0.kind == .income && $0.direction == .credit }.reduce(MoneyCents(0)) { $0 + $1.amountCents }
+        let inc = fyTxs.filter { FinancialCalculationEngine.isVerifiedIncome($0) }.reduce(MoneyCents(0)) { $0 + $1.amountCents }
         let sp = fyTxs.reduce(MoneyCents(0)) { $0 + FinancialCalculationEngine.netSpendContributionCents(for: $1, includeFixedCategories: true) }
         return (bounds.label, inc, max(0, sp))
     }
@@ -117,17 +119,21 @@ public struct InsightsAnalyticsView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.lg) {
-                deterministicInsightsSection
-                categorySpendChartCard
-                dailyFlexibleSpendChartCard
+                // Milestone 2 Advanced Spending Analytics Engine
+                SpendingAnalyticsDashboardView(store: store)
+
+                // Financial Year & Income/Expenditure Overview
                 incomeVsExpenditureAndFYCard
-                topMerchantsAndRecurringRatioCard
+
+                // Additional Deterministic In-App Insights
+                deterministicInsightsSection
             }
             .padding(DaylightTheme.Spacing.md)
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Insights & Analytics")
     }
 
@@ -164,17 +170,17 @@ public struct InsightsAnalyticsView: View {
                             Spacer()
                             if !insight.supportingTransactionIds.isEmpty {
                                 Text("Backed by \(insight.supportingTransactionIds.count) txn(s)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .font(DaylightTypography.finePrint)
+                                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                             }
                         }
                         Text(insight.title)
-                            .font(.headline)
+                            .font(DaylightTypography.cardTitle)
                         Text(insight.summary)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(DaylightTypography.subheadline)
+                            .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                         Text("Suggested action: \(insight.actionableRecommendation)")
-                            .font(.caption.weight(.medium))
+                            .font(DaylightTypography.captionMedium)
                             .foregroundStyle(DaylightTheme.accent)
                     }
                 }
@@ -238,7 +244,7 @@ public struct InsightsAnalyticsView: View {
     private var dailyFlexibleSpendChartCard: some View {
         let baselineDollars = Double(store.allowanceSummary.baselineDailyAllowanceCents) / 100.0
         return DaylightCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 DaylightSectionHeader(
                     title: "Flexible Spending Over Last 14 Days vs Daily Allowance",
                     subtitle: "Dashed rule indicates your baseline daily safe-to-spend (\(AustralianMoneyFormatter.format(cents: store.allowanceSummary.baselineDailyAllowanceCents))/day)"
@@ -273,11 +279,15 @@ public struct InsightsAnalyticsView: View {
         return DaylightCard {
             VStack(alignment: .leading, spacing: 12) {
                 DaylightSectionHeader(
-                    title: "Australian Financial Year (\(fy.label)) & Spend Ratio",
+                    title: "AFY (\(fy.label)) & Spend Ratio",
                     subtitle: "1 July – 30 June Australian Financial Year tracking"
                 )
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 12)], spacing: 12) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 200), spacing: 8, alignment: .top)],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(fy.label) Recorded Income")
                             .font(.caption)
@@ -287,6 +297,7 @@ public struct InsightsAnalyticsView: View {
                             .foregroundStyle(DaylightTheme.positive)
                             .monospacedDigit()
                     }
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .topLeading)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(fy.label) Net Expenditure")
                             .font(.caption)
@@ -295,6 +306,7 @@ public struct InsightsAnalyticsView: View {
                             .font(.title3.weight(.bold))
                             .monospacedDigit()
                     }
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .topLeading)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Fixed & Recurring vs Discretionary")
                             .font(.caption)
@@ -303,6 +315,7 @@ public struct InsightsAnalyticsView: View {
                             .font(.title3.weight(.bold))
                             .foregroundStyle(DaylightTheme.accent)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .topLeading)
                 }
             }
         }
@@ -319,14 +332,13 @@ public struct InsightsAnalyticsView: View {
                 ForEach(topMerchants) { item in
                     HStack {
                         Text(item.merchant)
-                            .font(.subheadline.weight(.medium))
+                            .font(DaylightTypography.bodyMedium)
                         Text("(\(item.count) txn\(item.count == 1 ? "" : "s"))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(DaylightTypography.caption)
+                            .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                         Spacer()
                         Text(AustralianMoneyFormatter.format(cents: item.netCents))
-                            .font(.subheadline.weight(.bold))
-                            .monospacedDigit()
+                            .font(DaylightTypography.financialAmount(size: 15, weight: .bold))
                     }
                     .padding(.vertical, 4)
                     Divider()
@@ -364,7 +376,8 @@ public struct AccountsView: View {
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Accounts & Connections")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -481,14 +494,14 @@ public struct AccountsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 8) {
                                         Text(acct.nickname)
-                                            .font(.headline)
+                                            .font(DaylightTypography.cardTitle)
                                         Text(acct.maskedAccountNumber)
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
+                                            .font(DaylightTypography.caption.monospaced())
+                                            .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                     }
                                     Text("\(acct.institutionName) • \(acct.accountType.displayName)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(DaylightTypography.caption)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                 }
 
                                 Spacer()
@@ -505,37 +518,35 @@ public struct AccountsView: View {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .foregroundStyle(DaylightTheme.warning)
                                     Text(err)
-                                        .font(.caption)
+                                        .font(DaylightTypography.caption)
                                     Spacer()
                                     Button("Retry Sync") {
                                         store.retryAccountSync(accountId: acct.id)
                                     }
-                                    .font(.caption.weight(.bold))
+                                    .font(DaylightTypography.captionMedium)
                                     .buttonStyle(.borderedProminent)
                                     .tint(DaylightTheme.accent)
                                 }
-                                .padding(10)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(DaylightTheme.warning.opacity(0.12)))
+                                .padding(DaylightTheme.Spacing.sm)
+                                .background(RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm).fill(DaylightTheme.warningSurface(for: colorScheme)))
                             }
 
                             HStack(spacing: 24) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(acct.accountType == .creditCard ? "Available Credit" : "Available Balance")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(DaylightTypography.caption)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                     Text(AustralianMoneyFormatter.format(cents: acct.availableBalanceCents))
-                                        .font(.title3.weight(.bold))
-                                        .monospacedDigit()
+                                        .font(DaylightTypography.financialAmount(size: 20, weight: .bold))
                                 }
 
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(acct.accountType == .creditCard ? "Current Balance Owing" : "Current Ledger Balance")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(DaylightTypography.caption)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                     Text(AustralianMoneyFormatter.format(cents: acct.currentBalanceCents))
-                                        .font(.title3.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
+                                        .font(DaylightTypography.financialAmount(size: 18, weight: .semibold))
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                 }
 
                                 Spacer()
@@ -543,8 +554,8 @@ public struct AccountsView: View {
 
                             HStack {
                                 Text("Coverage: \(acct.dataCoverageDescription) • Updated \(AustralianDateHelper.formatDateTime(acct.balanceUpdatedAt, timeZoneId: store.profile.timeZoneId))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .font(DaylightTypography.finePrint)
+                                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
 
                                 Spacer()
 

@@ -1497,6 +1497,14 @@ public final class SQLitePersistenceDatabase {
         }
     }
 
+    private func bindOptionalText(_ stmt: OpaquePointer?, index: Int32, value: String?) {
+        guard let value else {
+            sqlite3_bind_null(stmt, index)
+            return
+        }
+        bindText(stmt, index: index, value: value)
+    }
+
     private func bindBlob(_ stmt: OpaquePointer?, index: Int32, data: Data) {
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         _ = data.withUnsafeBytes { rawBuffer in

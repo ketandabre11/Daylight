@@ -5,10 +5,10 @@ import SwiftUI
 /// Centralised brand configuration so the product name and tagline can be updated
 /// without modifying application architecture.
 public enum BrandConfig {
-    public static let appName = "Daylight Money"
+    public static let appName = "Daylight"
     public static let tagline = "Know what you can spend today, understand where your money goes, and feel in control of your finances."
     public static let supportEmail = "support@daylightmoney.com.au"
-    public static let regulatoryDisclaimer = "Daylight Money is a personal finance and budgeting companion, not a bank, Authorised Deposit-taking Institution (ADI), lender, tax agent, or licensed financial adviser. Figures shown are budgeting estimates and do not represent general or personal financial advice under the Corporations Act 2001 (Cth)."
+    public static let regulatoryDisclaimer = "Daylight is a personal finance and budgeting companion, not a bank, Authorised Deposit-taking Institution (ADI), lender, tax agent, or licensed financial adviser. Figures shown are budgeting estimates and do not represent general or personal financial advice under the Corporations Act 2001 (Cth)."
 }
 
 // MARK: - App Theme Mode
@@ -22,9 +22,9 @@ public enum AppThemePreference: String, Codable, CaseIterable, Identifiable, Sen
 
     public var displayName: String {
         switch self {
-        case .system: return "Match System"
-        case .light: return "Daylight (Light)"
-        case .dark: return "Evening (Dark)"
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
         }
     }
 
@@ -40,93 +40,321 @@ public enum AppThemePreference: String, Codable, CaseIterable, Identifiable, Sen
 // MARK: - Semantic Design Tokens
 
 public enum DaylightTheme {
-    /// Warm stone/alabaster primary canvas in light mode (#F7F7F5), deep charcoal (#121316) in dark mode.
+    #if canImport(UIKit)
+    public static func dynamicColor(light: Color, dark: Color) -> Color {
+        Color(uiColor: UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ? UIColor(dark) : UIColor(light)
+        })
+    }
+    #else
+    public static func dynamicColor(light: Color, dark: Color) -> Color {
+        Color(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(dark) : NSColor(light)
+        }))
+    }
+    #endif
+
+    // MARK: - Core Palette Definitions
+
+    public enum Emerald {
+        /// Deep forest green: #071C13
+        public static let forest = Color(red: 7/255, green: 28/255, blue: 19/255)
+        /// Dark emerald base: #0B2A1D
+        public static let dark = Color(red: 11/255, green: 42/255, blue: 29/255)
+        /// Secondary emerald: #123C2B
+        public static let secondary = Color(red: 18/255, green: 60/255, blue: 43/255)
+        /// Vibrant deep emerald for light mode text/accents (#0E6838)
+        public static let vibrant = Color(red: 14/255, green: 104/255, blue: 56/255)
+        /// Deep emerald gradient background
+        public static var backgroundGradient: LinearGradient {
+            LinearGradient(
+                colors: [forest, dark, Color(red: 9/255, green: 34/255, blue: 23/255)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    public enum Lime {
+        /// Vibrant lime accent: #C2F36B (Used for fills and dark mode highlights)
+        public static let primary = Color(red: 194/255, green: 243/255, blue: 107/255)
+        /// Soft lime: #A9DE63
+        public static let soft = Color(red: 169/255, green: 222/255, blue: 99/255)
+        /// Mint accent: #9BE5C7
+        public static let mint = Color(red: 155/255, green: 229/255, blue: 199/255)
+        /// Subtle lime glow
+        public static let glow = primary.opacity(0.40)
+    }
+
+    // Warm light-mode surfaces
+    public static let lightCream = Color(red: 255/255, green: 249/255, blue: 239/255)
+    public static let lightCreamElevated = Color(red: 255/255, green: 252/255, blue: 246/255)
+    public static let lightCreamSecondary = Color(red: 252/255, green: 244/255, blue: 229/255)
+    public static let lightBeige = Color(red: 243/255, green: 231/255, blue: 214/255)
+    public static let lightBlush = Color(red: 252/255, green: 237/255, blue: 233/255)
+    public static let lightSoftRed = Color(red: 245/255, green: 215/255, blue: 208/255)
+    public static let lightCanvas = Color(red: 248/255, green: 243/255, blue: 235/255)
+    public static let lightCanvasSecondary = Color(red: 241/255, green: 233/255, blue: 222/255)
+
+    // MARK: - Adaptive Semantic Tokens (WCAG AA Compliant in both appearances)
+
+    /// Deep emerald for light-theme text/icons/borders (contrast > 6.8:1); Lime for dark-theme.
+    public static let accentEmerald = Color(red: 14/255, green: 104/255, blue: 56/255)
+    public static let accentLime = Lime.primary
+
+    /// Primary accent: Emerald in Light, Lime in Dark
+    public static var accent: Color {
+        dynamicColor(light: accentEmerald, dark: Lime.primary)
+    }
+    public static var accentText: Color {
+        dynamicColor(light: accentEmerald, dark: Lime.primary)
+    }
+    public static var primaryAction: Color {
+        dynamicColor(light: accentEmerald, dark: Lime.primary)
+    }
+
+    /// Primary label color: Deep Forest Green (#071C13) in Light (17.7:1 AAA), Pure White in Dark (18.7:1 AAA)
+    public static var textPrimary: Color {
+        dynamicColor(light: Emerald.forest, dark: Color.white)
+    }
+
+    /// Secondary label color: Slate Forest (#2C4F3F) in Light (9.1:1 AAA), Translucent White in Dark (9.1:1 AAA)
+    public static var textSecondary: Color {
+        dynamicColor(light: Color(red: 44/255, green: 79/255, blue: 63/255), dark: Color.white.opacity(0.72))
+    }
+
+    /// Muted tertiary label color: Sage Forest (#4D705F) in Light (5.5:1 AA), Translucent White in Dark (5.8:1 AA)
+    public static var textMuted: Color {
+        dynamicColor(light: Color(red: 77/255, green: 112/255, blue: 95/255), dark: Color.white.opacity(0.48))
+    }
+
+    /// Base canvas background: Warm ivory in Light, Deep Forest (#071C13) in Dark
+    public static var canvasBackground: Color {
+        dynamicColor(light: lightCanvas, dark: Emerald.forest)
+    }
+
+    /// Grouped card surface: Warm cream in Light, Frosted Glass (white 0.08) in Dark
+    public static var surface: Color {
+        dynamicColor(light: lightCream, dark: Color.white.opacity(0.08))
+    }
+
+    /// Elevated surface: Light cream in Light, Elevated Frosted Glass in Dark
+    public static var surfaceElevated: Color {
+        dynamicColor(light: lightCreamElevated, dark: Color.white.opacity(0.12))
+    }
+
+    /// Hairline glass border
+    public static var glassBorder: Color {
+        dynamicColor(light: Color(red: 7/255, green: 28/255, blue: 19/255).opacity(0.10), dark: Color.white.opacity(0.16))
+    }
+
+    /// Elevated border highlight
+    public static var glassBorderHighlight: Color {
+        dynamicColor(light: accentEmerald.opacity(0.20), dark: Color.white.opacity(0.28))
+    }
+
+    /// Hairline divider
+    public static var dividerColor: Color {
+        dynamicColor(light: Color(red: 7/255, green: 28/255, blue: 19/255).opacity(0.08), dark: Color.white.opacity(0.12))
+    }
+
+    /// Forest green for labels and brand text (never raw neon lime in light mode)
+    public static var forestGreen: Color {
+        dynamicColor(light: Emerald.forest, dark: Lime.primary)
+    }
+
+    public enum Glass {
+        public static var translucent: Color { DaylightTheme.surface }
+        public static var elevated: Color { DaylightTheme.surfaceElevated }
+        public static var border: Color { DaylightTheme.glassBorder }
+        public static var borderHighlight: Color { DaylightTheme.glassBorderHighlight }
+        public static let cornerRadius: CGFloat = 20
+    }
+
+    public enum GlassText {
+        public static var primary: Color { DaylightTheme.textPrimary }
+        public static var secondary: Color { DaylightTheme.textSecondary }
+        public static var muted: Color { DaylightTheme.textMuted }
+    }
+
+    // Canvas & Backgrounds (Explicit ColorScheme helpers for backwards compatibility)
     public static func background(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.07, green: 0.075, blue: 0.086)
-            : Color(red: 0.969, green: 0.969, blue: 0.961)
+        scheme == .dark ? Emerald.forest : lightCanvas
+    }
+    public static func backgroundPrimary(for scheme: ColorScheme) -> Color {
+        background(for: scheme)
+    }
+    public static func backgroundSecondary(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Emerald.dark : lightCanvasSecondary
     }
 
-    /// Elevated card surface (#FFFFFF in light mode, #1C1E24 in dark mode).
+    // Grouped Card Surfaces
     public static func surface(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.11, green: 0.118, blue: 0.141)
-            : Color.white
+        scheme == .dark ? Color.white.opacity(0.08) : lightCream
     }
-
-    /// Secondary grouped surface (#F0EFEA in light mode, #252830 in dark mode).
+    public static func surfacePrimary(for scheme: ColorScheme) -> Color {
+        surface(for: scheme)
+    }
     public static func secondarySurface(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.145, green: 0.157, blue: 0.188)
-            : Color(red: 0.941, green: 0.937, blue: 0.918)
+        scheme == .dark ? Color.white.opacity(0.12) : lightCreamSecondary
+    }
+    public static func surfaceSecondary(for scheme: ColorScheme) -> Color {
+        secondarySurface(for: scheme)
+    }
+    public static func surfaceTertiary(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Emerald.secondary.opacity(0.40) : Color(red: 228/255, green: 236/255, blue: 231/255)
     }
 
-    /// Primary near-black text (#1D1D1F in light mode, #F5F5F7 in dark mode).
+    // Text & Labels
     public static func primaryText(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.96, green: 0.96, blue: 0.97)
-            : Color(red: 0.114, green: 0.114, blue: 0.122)
+        scheme == .dark ? Color.white : Emerald.forest
     }
-
-    /// Restrained secondary grey text with WCAG AA contrast.
+    public static func textPrimary(for scheme: ColorScheme) -> Color {
+        primaryText(for: scheme)
+    }
     public static func secondaryText(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.68, green: 0.70, blue: 0.74)
-            : Color(red: 0.36, green: 0.37, blue: 0.40)
+        scheme == .dark ? Color.white.opacity(0.72) : Color(red: 44/255, green: 79/255, blue: 63/255)
+    }
+    public static func textSecondary(for scheme: ColorScheme) -> Color {
+        secondaryText(for: scheme)
+    }
+    public static func textTertiary(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.48) : Color(red: 77/255, green: 112/255, blue: 95/255)
     }
 
-    /// Subtle hairline border.
+    // Borders & Separators
     public static func border(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color.white.opacity(0.10)
-            : Color.black.opacity(0.08)
+        scheme == .dark ? Color.white.opacity(0.16) : Color(red: 7/255, green: 28/255, blue: 19/255).opacity(0.10)
+    }
+    public static func borderPrimary(for scheme: ColorScheme) -> Color {
+        border(for: scheme)
+    }
+    public static func separator(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.12) : Color(red: 7/255, green: 28/255, blue: 19/255).opacity(0.08)
     }
 
-    /// Deep forest-green primary action color (#145C3D in light mode, #1E7D54 in dark mode).
-    public static let forestGreen = Color(red: 0.078, green: 0.361, blue: 0.239)
-    public static let primaryAction = forestGreen
+    // Brand & Semantic Palette
+    public static let accentBright = Lime.soft
 
-    /// Muted sage secondary accent (#5F8270).
-    public static let sageAccent = Color(red: 0.373, green: 0.510, blue: 0.439)
-
-    /// Subtle muted sage container fill for secondary highlights.
+    /// Mint container for secondary highlights.
+    public static let sageAccent = Lime.mint
     public static func sageSurface(for scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.14, green: 0.21, blue: 0.18)
-            : Color(red: 0.914, green: 0.941, blue: 0.922)
+            ? Color.white.opacity(0.08)
+            : Color(red: 235/255, green: 245/255, blue: 239/255)
     }
 
-    /// Sophisticated Tasman Teal / Eucalyptus Blue accent (aligned with deep forest-sage palette).
-    public static let accent = Color(red: 0.078, green: 0.380, blue: 0.275)
-    public static let accentBright = Color(red: 0.11, green: 0.52, blue: 0.37)
+    /// Financially positive state (accessible green).
+    public static var positive: Color {
+        dynamicColor(light: Color(red: 14/255, green: 104/255, blue: 56/255), dark: Color(red: 52/255, green: 211/255, blue: 153/255))
+    }
+    public static func positiveSurface(for scheme: ColorScheme) -> Color {
+        positive.opacity(scheme == .dark ? 0.22 : 0.12)
+    }
 
-    /// Accessible positive financial state (Forest Green).
-    public static let positive = Color(red: 0.11, green: 0.53, blue: 0.33)
+    /// Accessible caution/warning state (amber).
+    public static var warning: Color {
+        dynamicColor(light: Color(red: 180/255, green: 83/255, blue: 9/255), dark: Color(red: 251/255, green: 191/255, blue: 36/255))
+    }
+    public static func warningSurface(for scheme: ColorScheme) -> Color {
+        warning.opacity(scheme == .dark ? 0.22 : 0.12)
+    }
 
-    /// Accessible caution/approaching threshold state (Warm Amber).
-    public static let warning = Color(red: 0.78, green: 0.47, blue: 0.06)
+    /// Accessible destructive/over-budget state (red).
+    public static var cautionRed: Color {
+        dynamicColor(light: Color(red: 197/255, green: 34/255, blue: 31/255), dark: Color(red: 248/255, green: 113/255, blue: 113/255))
+    }
+    public static var negative: Color { cautionRed }
+    public static func negativeSurface(for scheme: ColorScheme) -> Color {
+        cautionRed.opacity(scheme == .dark ? 0.22 : 0.12)
+    }
 
-    /// Restrained over-budget or alert state (Terracotta Red — empathetic, not harsh neon).
-    public static let cautionRed = Color(red: 0.76, green: 0.23, blue: 0.22)
+    /// Disabled UI control state.
+    public static let disabled = Color.secondary.opacity(0.40)
 
     /// Standard accessible touch-target height for primary/secondary buttons.
     public static let buttonHeight: CGFloat = 50
 
-    /// Spacing scale
+    /// Unified 4-point spacing scale and layout tokens
     public enum Spacing {
         public static let xxs: CGFloat = 4
         public static let xs: CGFloat = 8
         public static let sm: CGFloat = 12
         public static let md: CGFloat = 16
+        public static let base: CGFloat = 20
+        public static let lg: CGFloat = 24
+        public static let xl: CGFloat = 32
+        public static let xxl: CGFloat = 40
+
+        /// Standard horizontal screen margin across the entire application
+        public static let screenMargin: CGFloat = 16
+        /// Standard internal card padding
+        public static let cardPadding: CGFloat = 16
+        /// Standard vertical gap between stacked cards
+        public static let cardGap: CGFloat = 16
+        /// Standard bottom safe inset to prevent floating navigation bar overlap
+        public static let bottomNavInset: CGFloat = 88
+    }
+
+    /// Corner radii scale
+    public enum Radius {
+        public static let xs: CGFloat = 6
+        public static let sm: CGFloat = 10
+        public static let md: CGFloat = 16
+        public static let card: CGFloat = 20
+        public static let lg: CGFloat = 24
+        public static let pill: CGFloat = 999
+    }
+
+    /// Icon dimensions
+    public enum IconSize {
+        public static let sm: CGFloat = 16
+        public static let md: CGFloat = 20
         public static let lg: CGFloat = 24
         public static let xl: CGFloat = 32
     }
+}
 
-    /// Corner radii
-    public enum Radius {
-        public static let sm: CGFloat = 10
-        public static let md: CGFloat = 16
-        public static let lg: CGFloat = 22
+// MARK: - Centralised Semantic Typography System
+
+public enum DaylightTypography {
+    /// Large financial dashboard values ($133.33)
+    public static let largeDisplay = Font.system(.largeTitle, design: .rounded, weight: .bold)
+
+    /// Main screen headings
+    public static let screenTitle = Font.title2.weight(.bold)
+
+    /// Section titles
+    public static let sectionTitle = Font.headline.weight(.semibold)
+
+    /// Card and component headings
+    public static let cardTitle = Font.subheadline.weight(.semibold)
+
+    /// Main descriptions and content
+    public static let body = Font.body
+    public static let bodyMedium = Font.body.weight(.medium)
+
+    /// Supporting / callout information
+    public static let callout = Font.callout
+    public static let calloutMedium = Font.callout.weight(.medium)
+    public static let subheadline = Font.subheadline
+    public static let subheadlineMedium = Font.subheadline.weight(.medium)
+
+    /// Dates, hints and metadata
+    public static let caption = Font.caption
+    public static let captionMedium = Font.caption.weight(.medium)
+
+    /// Compact transaction-list hierarchy
+    public static let transactionTitle = Font.subheadline.weight(.medium)
+    public static let transactionMetadata = Font.caption
+    public static let transactionAmount = Font.subheadline.weight(.bold).monospacedDigit()
+
+    /// Legal and supplementary fine print
+    public static let finePrint = Font.caption2
+
+    /// Monospaced rounded currency amounts
+    public static func financialAmount(size: CGFloat, weight: Font.Weight = .bold) -> Font {
+        Font.system(size: size, weight: weight, design: .rounded).monospacedDigit()
     }
 }
 
@@ -134,6 +362,7 @@ public enum DaylightTheme {
 
 public struct DaylightCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     private let padding: CGFloat
     private let content: Content
 
@@ -149,13 +378,31 @@ public struct DaylightCard<Content: View>: View {
             .background(
                 RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
                     .fill(DaylightTheme.surface(for: colorScheme))
+                    .background(
+                        Group {
+                            if !reduceTransparency {
+                                RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                                    .fill(.ultraThinMaterial.opacity(colorScheme == .dark ? 0.65 : 0.75))
+                            }
+                        }
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
                     .strokeBorder(DaylightTheme.border(for: colorScheme), lineWidth: 1)
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                    .stroke(
+                        colorScheme == .dark
+                            ? Color.white.opacity(0.08)
+                            : Color.white.opacity(0.62),
+                        lineWidth: 0.75
+                    )
+                    .allowsHitTesting(false)
+            )
             .shadow(
-                color: colorScheme == .dark ? .clear : Color.black.opacity(0.035),
+                color: colorScheme == .dark ? Color.black.opacity(0.25) : Color.black.opacity(0.035),
                 radius: 8,
                 x: 0,
                 y: 3
@@ -419,6 +666,7 @@ public struct DaylightBrandMarkView: View {
 }
 
 public struct DaylightPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
 
     public init() {}
@@ -426,14 +674,21 @@ public struct DaylightPrimaryButtonStyle: ButtonStyle {
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.headline.weight(.semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(
+                colorScheme == .dark ? DaylightTheme.Emerald.forest : Color.white
+            )
             .frame(maxWidth: .infinity)
             .frame(minHeight: DaylightTheme.buttonHeight)
             .padding(.horizontal, DaylightTheme.Spacing.md)
             .background(
                 RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
-                    .fill(isEnabled ? DaylightTheme.forestGreen : DaylightTheme.sageAccent.opacity(0.45))
+                    .fill(
+                        isEnabled
+                            ? (colorScheme == .dark ? DaylightTheme.Lime.primary : DaylightTheme.accentEmerald)
+                            : DaylightTheme.disabled
+                    )
             )
+            .contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.88 : 1.0)
             .scaleEffect(configuration.isPressed ? 0.99 : 1.0)
     }
@@ -460,6 +715,7 @@ public struct DaylightSecondaryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
                     .strokeBorder(DaylightTheme.sageAccent.opacity(0.38), lineWidth: 1)
             )
+            .contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.86 : 1.0)
     }
 }
@@ -503,4 +759,239 @@ public struct DaylightDropdownPill: View {
     }
 }
 
+// MARK: - Contextual Information Disclosure
 
+public struct DaylightInfoDisclosure: View {
+    private let message: LocalizedStringKey
+    @State private var isExpanded = false
+
+    public init(_ message: LocalizedStringKey) {
+        self.message = message
+    }
+
+    public var body: some View {
+        HStack(alignment: .top, spacing: DaylightTheme.Spacing.xs) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(DaylightTheme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(DaylightTheme.accent.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Hide information" : "Show information")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+
+            if isExpanded {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Standardized Destructive & Tertiary Button Styles
+
+public struct DaylightDestructiveButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(DaylightTypography.sectionTitle)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: DaylightTheme.buttonHeight)
+            .padding(.horizontal, DaylightTheme.Spacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                    .fill(isEnabled ? DaylightTheme.cautionRed : DaylightTheme.cautionRed.opacity(0.40))
+            )
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.88 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.99 : 1.0)
+    }
+}
+
+public struct DaylightTertiaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(DaylightTypography.cardTitle)
+            .foregroundStyle(isEnabled ? DaylightTheme.accent : .secondary)
+            .padding(.horizontal, DaylightTheme.Spacing.xs)
+            .padding(.vertical, DaylightTheme.Spacing.xxs)
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.70 : 1.0)
+    }
+}
+
+// MARK: - Standardized Form Field Container
+
+public struct DaylightFormFieldContainer<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let label: String
+    let helperText: String?
+    let errorText: String?
+    let content: Content
+
+    public init(
+        _ label: String,
+        helperText: String? = nil,
+        errorText: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.label = label
+        self.helperText = helperText
+        self.errorText = errorText
+        self.content = content()
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: DaylightTheme.Spacing.xxs) {
+            Text(label)
+                .font(DaylightTypography.captionMedium)
+                .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
+
+            content
+
+            if let errorText, !errorText.isEmpty {
+                Text(errorText)
+                    .font(DaylightTypography.finePrint)
+                    .foregroundStyle(DaylightTheme.cautionRed)
+            } else if let helperText, !helperText.isEmpty {
+                Text(helperText)
+                    .font(DaylightTypography.finePrint)
+                    .foregroundStyle(DaylightTheme.textTertiary(for: colorScheme))
+            }
+        }
+    }
+}
+
+// MARK: - Standardized Text Field Modifier
+
+public struct DaylightTextFieldModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let isError: Bool
+
+    public init(isError: Bool = false) {
+        self.isError = isError
+    }
+
+    public func body(content: Content) -> some View {
+        content
+            .font(DaylightTypography.body)
+            .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+            .padding(.horizontal, DaylightTheme.Spacing.sm)
+            .padding(.vertical, DaylightTheme.Spacing.sm)
+            .frame(minHeight: 44)
+            .background(
+                RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                    .fill(DaylightTheme.secondarySurface(for: colorScheme))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                    .strokeBorder(isError ? DaylightTheme.cautionRed : DaylightTheme.border(for: colorScheme), lineWidth: 1)
+            )
+    }
+}
+
+public extension View {
+    func daylightTextFieldStyle(isError: Bool = false) -> some View {
+        modifier(DaylightTextFieldModifier(isError: isError))
+    }
+}
+
+// MARK: - Standardized Card Header
+
+public struct DaylightCardHeader: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let subtitle: String?
+    let icon: String?
+
+    public init(_ title: String, subtitle: String? = nil, icon: String? = nil) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+    }
+
+    public var body: some View {
+        HStack(spacing: DaylightTheme.Spacing.xs) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(DaylightTypography.cardTitle)
+                    .foregroundStyle(DaylightTheme.accent)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DaylightTypography.cardTitle)
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(DaylightTypography.caption)
+                        .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
+                }
+            }
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Standardized List Row
+
+public struct DaylightListRow<Leading: View, Trailing: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let subtitle: String?
+    let leading: Leading
+    let trailing: Trailing
+
+    public init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.leading = leading()
+        self.trailing = trailing()
+    }
+
+    public var body: some View {
+        HStack(spacing: DaylightTheme.Spacing.sm) {
+            leading
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DaylightTypography.cardTitle)
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                    .lineLimit(1)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(DaylightTypography.caption)
+                        .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            trailing
+        }
+        .padding(.vertical, DaylightTheme.Spacing.xs)
+    }
+}

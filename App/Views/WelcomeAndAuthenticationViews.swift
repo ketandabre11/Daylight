@@ -52,19 +52,19 @@ public struct DaylightWelcomeView: View {
                 VStack(spacing: DaylightTheme.Spacing.md) {
                     DaylightBrandMarkView(size: 76)
 
-                    Text("Daylight Money")
+                    Text(BrandConfig.appName)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(DaylightTheme.forestGreen)
                         .textCase(.uppercase)
                         .tracking(1.2)
 
                     Text("A clearer view of your money.")
-                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                        .font(DaylightTypography.largeDisplay)
                         .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
                         .multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
 
-                    Text("Track everyday spending, manage pay-cycle budgets, and build lasting savings with calm, transparent financial clarity designed for Australians.")
+                    Text("Manage spending, plan budgets, and grow savings with clarity and confidence.")
                         .font(.body)
                         .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
                         .multilineTextAlignment(.center)
@@ -77,17 +77,17 @@ public struct DaylightWelcomeView: View {
                     welcomeFeatureRow(
                         icon: "sun.max.fill",
                         title: "Safe-to-Spend Clarity",
-                        description: "Know what you can comfortably spend each day after bills, category budgets, and savings targets."
+                        description: "See how much you can safely spend each day after bills, budgets, and savings."
                     )
                     welcomeFeatureRow(
                         icon: "chart.pie.fill",
                         title: "Budgets & Custom Categories",
-                        description: "Organise spending across Australian essentials and custom categories tailored to your household."
+                        description: "Manage spending across Australian essentials and personalised categories."
                     )
                     welcomeFeatureRow(
                         icon: "target",
                         title: "Dedicated Savings Goals",
-                        description: "Record contributions and track progress toward your emergency fund, holiday, or home deposit."
+                        description: "Track savings contributions and progress toward your financial goals."
                     )
                 }
 
@@ -125,32 +125,17 @@ public struct DaylightWelcomeView: View {
                     .buttonStyle(DaylightSecondaryButtonStyle())
                     .accessibilityIdentifier("welcome_login_button")
                     .accessibilityHint("Opens the login screen for existing accounts")
-
-                    Button {
-                        store.enterSyntheticDemoWorkspace()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "sparkles")
-                            Text("Explore Synthetic Australian Demo")
-                        }
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(DaylightTheme.forestGreen)
-                        .padding(.vertical, 8)
-                    }
-                    .accessibilityIdentifier("welcome_explore_demo_button")
                 }
 
                 // Brief Privacy Statement
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.caption)
-                            .foregroundStyle(DaylightTheme.forestGreen)
-                        Text("Private by Design")
+                        Text("Private\n&\nDesigned by KETAN")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                            .multilineTextAlignment(.center)
                     }
-                    Text("Your financial records are stored in an isolated per-account workspace and protected by Apple Keychain authentication. Daylight Money never sells your data or stores banking passwords.")
+                    Text("Your financial data stays private in your secure account. Daylight never sells your data or stores banking passwords.")
                         .font(.caption2)
                         .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
                         .multilineTextAlignment(.center)
@@ -173,7 +158,7 @@ public struct DaylightWelcomeView: View {
                     .foregroundStyle(DaylightTheme.forestGreen)
                     .frame(width: 38, height: 38)
                     .background(DaylightTheme.sageSurface(for: colorScheme))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous))
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -204,6 +189,8 @@ public struct DaylightRegistrationView: View {
     @State private var showPassword: Bool = false
     @State private var showConfirmPassword: Bool = false
     @State private var hasInteractedWithForm: Bool = false
+    @State private var avatarImageData: Data? = nil
+    @State private var showingPhotoPickerSheet: Bool = false
 
     public init(store: DaylightStore) {
         self.store = store
@@ -238,12 +225,12 @@ public struct DaylightRegistrationView: View {
                 // Header
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Create your account")
-                        .font(.system(.title, design: .rounded, weight: .bold))
+                        .font(DaylightTypography.screenTitle)
                         .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
                         .accessibilityAddTraits(.isHeader)
 
                     Text("Start with a clean personal workspace tailored to your Australian pay cycle and categories.")
-                        .font(.subheadline)
+                        .font(DaylightTypography.subheadline)
                         .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
                 }
 
@@ -253,7 +240,7 @@ public struct DaylightRegistrationView: View {
                             Image(systemName: "exclamationmark.circle.fill")
                                 .foregroundStyle(DaylightTheme.cautionRed)
                             Text(errorMsg)
-                                .font(.caption.weight(.medium))
+                                .font(DaylightTypography.captionMedium)
                                 .foregroundStyle(DaylightTheme.cautionRed)
                             Spacer()
                         }
@@ -264,6 +251,45 @@ public struct DaylightRegistrationView: View {
                 // Form Fields Card
                 DaylightCard(padding: DaylightTheme.Spacing.lg) {
                     VStack(alignment: .leading, spacing: DaylightTheme.Spacing.md) {
+                        // Profile Photo Picker Section
+                        HStack {
+                            Spacer()
+                            VStack(spacing: 8) {
+                                ZStack(alignment: .bottomTrailing) {
+                                    DaylightAvatarView(
+                                        avatarImageData: avatarImageData,
+                                        name: fullName.isEmpty ? "New Member" : fullName,
+                                        size: 80,
+                                        showBorder: true,
+                                        borderColor: DaylightTheme.accent
+                                    )
+
+                                    Button {
+                                        showingPhotoPickerSheet = true
+                                    } label: {
+                                        Image(systemName: "camera.circle.fill")
+                                            .font(.system(size: 26))
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, DaylightTheme.accent)
+                                            .background(Circle().fill(DaylightTheme.surface(for: colorScheme)))
+                                    }
+                                    .offset(x: 4, y: 4)
+                                    .accessibilityLabel("Select profile photo")
+                                }
+
+                                Button {
+                                    showingPhotoPickerSheet = true
+                                } label: {
+                                    Text(avatarImageData == nil ? "Add Photo (Optional)" : "Change Photo")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(DaylightTheme.accent)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Spacer()
+                        }
+                        .padding(.bottom, 2)
+
                         // Full Name
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Full name")
@@ -398,7 +424,8 @@ public struct DaylightRegistrationView: View {
                             fullName: fullName,
                             email: email,
                             password: password,
-                            confirmPassword: confirmPassword
+                            confirmPassword: confirmPassword,
+                            avatarImageData: avatarImageData
                         )
                     }
                 } label: {
@@ -438,6 +465,14 @@ public struct DaylightRegistrationView: View {
             .padding(.horizontal, DaylightTheme.Spacing.lg)
             .frame(maxWidth: 520)
             .frame(maxWidth: .infinity)
+        }
+        .sheet(isPresented: $showingPhotoPickerSheet) {
+            ProfilePhotoPickerSheet(
+                initialImageData: avatarImageData,
+                displayName: fullName.isEmpty ? "New Member" : fullName
+            ) { newImage in
+                self.avatarImageData = newImage
+            }
         }
     }
 }
@@ -482,12 +517,12 @@ public struct DaylightLoginView: View {
                 // Header
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Welcome back")
-                        .font(.system(.title, design: .rounded, weight: .bold))
+                        .font(DaylightTypography.screenTitle)
                         .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
                         .accessibilityAddTraits(.isHeader)
 
-                    Text("Log in to access your personal Daylight Money workspace.")
-                        .font(.subheadline)
+                    Text("Log in to access your personal Daylight.")
+                        .font(DaylightTypography.subheadline)
                         .foregroundStyle(DaylightTheme.secondaryText(for: colorScheme))
                 }
 
@@ -609,7 +644,7 @@ public struct DaylightLoginView: View {
                         store.authNavigationRoute = .register
                     } label: {
                         HStack(spacing: 4) {
-                            Text("New to Daylight Money?")
+                            Text("New to Daylight?")
                                 .foregroundStyle(.secondary)
                             Text("Create your account")
                                 .fontWeight(.semibold)
@@ -807,7 +842,7 @@ public struct CategoriesManagementSheet: View {
                 .font(.caption)
 
             if customCategories.isEmpty {
-                Text("No custom categories yet. Create one above to tailor Daylight Money to your household.")
+                Text("No custom categories yet. Create one above to tailor Daylight to your household.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

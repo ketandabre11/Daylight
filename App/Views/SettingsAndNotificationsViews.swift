@@ -1,5 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct ExportTextFileDocument: FileDocument {
     public static var readableContentTypes: [UTType] { [.commaSeparatedText, .json, .plainText] }
@@ -29,6 +32,7 @@ public struct ExportTextFileDocument: FileDocument {
 public struct NotificationsSheetView: View {
     @Bindable var store: DaylightStore
     @Environment(\.dismiss) private var dismiss
+    @State private var authorizationState: DaylightNotificationScheduler.AuthorizationState = .notDetermined
 
     public init(store: DaylightStore) {
         self.store = store
@@ -67,6 +71,33 @@ public struct NotificationsSheetView: View {
                         .padding(.top, 2)
                     }
                     .padding(.vertical, 4)
+                }
+
+                Section("System Permission") {
+                    HStack {
+                        Text("iOS notification access")
+                        Spacer()
+                        Text(permissionLabel)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(permissionStateColor)
+                    }
+                    if authorizationState == .notDetermined {
+                        Button("Allow Notifications") {
+                            Task {
+                                authorizationState = (try? await DaylightNotificationScheduler.requestAuthorization())
+                                    ?? .denied
+                                store.refreshDailyNotificationsAndSchedule()
+                            }
+                        }
+                    } else if authorizationState == .denied || authorizationState == .restricted {
+                        Button("Open iOS Notification Settings") {
+                            #if canImport(UIKit)
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                            #endif
+                        }
+                    }
                 }
 
                 Section("Recent Alerts & Reminders (Tap to Open Screen)") {
@@ -138,6 +169,17 @@ public struct NotificationsSheetView: View {
                     }
 
                     Toggle(
+                        "Notifications",
+                        isOn: Binding(
+                            get: { store.notificationPreferences.notificationsEnabled },
+                            set: { val in
+                                var p = store.notificationPreferences
+                                p.notificationsEnabled = val
+                                store.updateNotificationPreferences(p)
+                            }
+                        )
+                    )
+                    Toggle(
                         "Hide Exact Dollar Amounts in Notification Previews",
                         isOn: Binding(
                             get: { store.notificationPreferences.hideExactAmountsInPreviews },
@@ -181,17 +223,17 @@ public struct NotificationsSheetView: View {
                             }
                         )
                     )
-                    Toggle(
-                        "Payday & Cycle Reset Reminders",
-                        isOn: Binding(
-                            get: { store.notificationPreferences.paydayRemindersEnabled },
-                            set: { val in
-                                var p = store.notificationPreferences
-                                p.paydayRemindersEnabled = val
-                                store.updateNotificationPreferences(p)
-                            }
-                        )
-                    )
+                    Text("Payday, recurring-change, and unusual-spending alerts are not available in this build.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .task {
+                authorizationState = await DaylightNotificationScheduler.authorizationState()
+            }
+            .onAppear {
+                Task {
+                    authorizationState = await DaylightNotificationScheduler.authorizationState()
                 }
             }
             .navigationTitle("Notifications")
@@ -209,6 +251,26 @@ public struct NotificationsSheetView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+
+    private var permissionLabel: String {
+        switch authorizationState {
+        case .notDetermined: return "Not set"
+        case .authorized: return "Allowed"
+        case .provisional: return "Quietly allowed"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .ephemeral: return "Temporary"
+        case .unavailable: return "Unavailable"
+        }
+    }
+
+    private var permissionStateColor: Color {
+        switch authorizationState {
+        case .authorized, .provisional: return .green
+        case .denied, .restricted: return .red
+        default: return .secondary
         }
     }
 
@@ -252,10 +314,20 @@ public struct SettingsPrivacyView: View {
     @State private var showingDeleteConfirmation: Bool = false
     @State private var showingArchitectureDocsSheet: Bool = false
     @State private var showingAuditLogSheet: Bool = false
+    @State private var showingProfilePhotoSheet: Bool = false
+
+    private enum ProfileField: Hashable {
+        case takeHomePay
+        case savingsTarget
+    }
 
     @State private var preferredNameDraft: String = ""
     @State private var takeHomeDollarsDraft: String = ""
     @State private var savingsDollarsDraft: String = ""
+    @State private var saveFeedbackMessage: String? = nil
+    @State private var saveErrorMessage: String? = nil
+    @State private var didJustSave: Bool = false
+    @FocusState private var focusedProfileField: ProfileField?
 
     public init(store: DaylightStore) {
         self.store = store
@@ -274,8 +346,19 @@ public struct SettingsPrivacyView: View {
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .scrollDismissesKeyboard(.interactively)
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Settings")
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    dismissKeyboard()
+                }
+                .fontWeight(.semibold)
+            }
+        }
         .onAppear {
             syncDrafts()
         }
@@ -289,6 +372,12 @@ public struct SettingsPrivacyView: View {
             syncDrafts()
         }
         .onChange(of: store.authenticatedSession?.fullName) { _, _ in
+            syncDrafts()
+        }
+        .onChange(of: store.profile.typicalTakeHomePayCents) { _, _ in
+            syncDrafts()
+        }
+        .onChange(of: store.profile.savingsTargetPerPeriodCents) { _, _ in
             syncDrafts()
         }
         .sheet(isPresented: $showingExportSheet) {
@@ -316,6 +405,24 @@ public struct SettingsPrivacyView: View {
         }
         .sheet(isPresented: $showingAuditLogSheet) {
             auditAndImportHistorySheet
+        }
+        .sheet(isPresented: $showingProfilePhotoSheet) {
+            ProfilePhotoPickerSheet(
+                initialImageData: store.profile.avatarImageData,
+                displayName: resolvedDisplayName
+            ) { updatedImage in
+                do {
+                    try store.updateProfileAvatar(imageData: updatedImage)
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        saveFeedbackMessage = updatedImage == nil ? "Profile picture removed." : "Profile picture updated."
+                    }
+                    #if canImport(UIKit)
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    #endif
+                } catch {
+                    saveErrorMessage = error.localizedDescription
+                }
+            }
         }
         .fileExporter(
             isPresented: $showingSystemFileExporter,
@@ -371,13 +478,42 @@ public struct SettingsPrivacyView: View {
         DaylightCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 14) {
-                    Image(systemName: store.isDemoMode ? "sparkles.rectangle.stack.fill" : "person.crop.circle.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(DaylightTheme.forestGreen)
-                        .frame(width: 48, height: 48)
-                        .background(Circle().fill(DaylightTheme.forestGreen.opacity(0.12)))
+                    // Avatar with interactive edit badge (Single relevant position)
+                    Button {
+                        dismissKeyboard()
+                        showingProfilePhotoSheet = true
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            DaylightAvatarView(
+                                avatarImageData: store.profile.avatarImageData,
+                                name: resolvedDisplayName,
+                                size: 58,
+                                isDemo: store.isDemoMode,
+                                showBorder: true,
+                                borderColor: DaylightTheme.accent.opacity(0.6)
+                            )
 
-                    VStack(alignment: .leading, spacing: 3) {
+                            // Subtle edit / camera badge indicator
+                            Circle()
+                                .fill(DaylightTheme.accent)
+                                .frame(width: 22, height: 22)
+                                .overlay(
+                                    Image(systemName: "camera.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.white)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(DaylightTheme.surface(for: colorScheme), lineWidth: 2)
+                                )
+                                .offset(x: 2, y: 2)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Change profile picture")
+                    .accessibilityHint("Opens options to upload a photo, take a picture, or select an Australian avatar preset.")
+
+                    VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             Text(resolvedDisplayName)
                                 .font(.headline)
@@ -387,9 +523,33 @@ public struct SettingsPrivacyView: View {
                                 tone: store.isDemoMode ? .warning : .positive
                             )
                         }
+
                         Text(store.authenticatedSession?.email ?? "Synthetic Australian Demo Workspace")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        Button {
+                            dismissKeyboard()
+                            showingProfilePhotoSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: store.profile.avatarImageData == nil ? "plus.circle.fill" : "camera.fill")
+                                    .font(.caption2.weight(.semibold))
+                                Text(store.profile.avatarImageData == nil ? "Add Photo" : "Change Photo")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .foregroundStyle(DaylightTheme.accent)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(DaylightTheme.accent.opacity(0.1))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                        .accessibilityLabel("Change profile picture")
                     }
 
                     Spacer()
@@ -397,32 +557,18 @@ public struct SettingsPrivacyView: View {
 
                 Divider()
 
-                HStack(spacing: 10) {
-                    Button {
-                        store.switchWorkspaceMode(toDemo: !store.isDemoMode)
-                    } label: {
-                        Label(
-                            store.isDemoMode ? "Switch to Personal" : "Try Demo Mode",
-                            systemImage: "arrow.left.arrow.right"
-                        )
-                        .font(.footnote.weight(.medium))
+                Button(role: .destructive) {
+                    Task {
+                        await store.logoutAccount()
+                    }
+                } label: {
+                    Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+                        .font(.footnote.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(role: .destructive) {
-                        Task {
-                            await store.logoutAccount()
-                        }
-                    } label: {
-                        Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
-                            .font(.footnote.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(DaylightTheme.cautionRed)
-                    .accessibilityIdentifier("settings_logout_button")
                 }
+                .buttonStyle(.bordered)
+                .tint(DaylightTheme.cautionRed)
+                .accessibilityIdentifier("settings_logout_button")
             }
         }
     }
@@ -436,12 +582,12 @@ public struct SettingsPrivacyView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Profile & Pay Cycle")
                             .font(.headline)
-                        Text("AUD ($) • Australian Financial Year (1 Jul – 30 Jun)")
+                        Text("AUD ($) • AFY (1 Jul – 30 Jun)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Setup Wizard") {
+                    Button("Setup") {
                         store.showingOnboardingSheet = true
                     }
                     .font(.caption.weight(.semibold))
@@ -475,7 +621,9 @@ public struct SettingsPrivacyView: View {
                         Menu {
                             ForEach(AustralianTimeZone.allCases) { tz in
                                 Button {
+                                    dismissKeyboard()
                                     var p = store.profile
+                                    p.tenantId = store.activeTenantId
                                     p.timeZoneId = tz.rawValue
                                     try? store.updateProfile(p)
                                 } label: {
@@ -495,9 +643,10 @@ public struct SettingsPrivacyView: View {
                         Menu {
                             ForEach(PayFrequency.allCases) { f in
                                 Button {
-                                    var p = store.profile
-                                    p.payFrequency = f
-                                    try? store.updateProfile(p)
+                                    dismissKeyboard()
+                                    // Rescales pay & savings so annual income (and daily allowance) stay consistent.
+                                    try? store.changePayFrequency(to: f)
+                                    syncDrafts()
                                 } label: {
                                     if f == store.profile.payFrequency {
                                         Label(f.displayName, systemImage: "checkmark")
@@ -511,44 +660,142 @@ public struct SettingsPrivacyView: View {
                         }
                     }
 
-                    labeledFieldRow("Take-Home Pay (AUD)") {
+                    labeledFieldRow("Take-Home Pay per \(store.profile.payFrequency.displayName) (AUD)") {
                         TextField("0.00", text: $takeHomeDollarsDraft)
+                            .focused($focusedProfileField, equals: .takeHomePay)
                             .multilineTextAlignment(.trailing)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 140)
                             #if os(iOS)
                             .keyboardType(.decimalPad)
                             #endif
+                            .onChange(of: takeHomeDollarsDraft) { _, _ in
+                                saveErrorMessage = nil
+                            }
                     }
 
-                    labeledFieldRow("Savings Target (AUD)") {
+                    labeledFieldRow("Savings Target per \(store.profile.payFrequency.displayName) (AUD)") {
                         TextField("0.00", text: $savingsDollarsDraft)
+                            .focused($focusedProfileField, equals: .savingsTarget)
                             .multilineTextAlignment(.trailing)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 140)
                             #if os(iOS)
                             .keyboardType(.decimalPad)
                             #endif
+                            .onChange(of: savingsDollarsDraft) { _, _ in
+                                saveErrorMessage = nil
+                            }
                     }
                 }
 
+                if let saveErrorMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                        Text(saveErrorMessage)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                            .fill(DaylightTheme.cautionRed.opacity(0.10))
+                    )
+                }
+
+                if let saveFeedbackMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(DaylightTheme.positive)
+                        Text(saveFeedbackMessage)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                            .fill(DaylightTheme.positive.opacity(0.12))
+                    )
+                }
+
                 Button {
-                    var p = store.profile
-                    p.preferredName = resolvedDisplayName
-                    if let payCents = AustralianMoneyFormatter.parseToCents(takeHomeDollarsDraft), payCents >= 0 {
-                        p.typicalTakeHomePayCents = payCents
-                    }
-                    if let savCents = AustralianMoneyFormatter.parseToCents(savingsDollarsDraft), savCents >= 0 {
-                        p.savingsTargetPerPeriodCents = savCents
-                    }
-                    try? store.updateProfile(p)
-                    store.statusBannerMessage = "Saved profile & pay-cycle settings."
+                    saveProfileChanges()
                 } label: {
-                    Text("Save Changes")
+                    HStack(spacing: 6) {
+                        if didJustSave {
+                            Image(systemName: "checkmark.circle.fill")
+                        }
+                        Text(didJustSave ? "Changes Saved" : "Save Changes")
+                    }
                 }
                 .buttonStyle(DaylightPrimaryButtonStyle())
                 .padding(.top, 4)
             }
+        }
+    }
+
+    private func dismissKeyboard() {
+        focusedProfileField = nil
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+        #endif
+    }
+
+    private func saveProfileChanges() {
+        dismissKeyboard()
+        saveErrorMessage = nil
+
+        let trimmedPay = takeHomeDollarsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsedPayCents: MoneyCents? = trimmedPay.isEmpty
+            ? 0
+            : AustralianMoneyFormatter.parseToCents(trimmedPay)
+        guard let payCents = parsedPayCents, payCents >= 0 else {
+            saveErrorMessage = "Enter a valid non-negative dollar amount for Take-Home Pay."
+            return
+        }
+
+        let trimmedSavings = savingsDollarsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsedSavingsCents: MoneyCents? = trimmedSavings.isEmpty
+            ? 0
+            : AustralianMoneyFormatter.parseToCents(trimmedSavings)
+        guard let savCents = parsedSavingsCents, savCents >= 0 else {
+            saveErrorMessage = "Enter a valid non-negative dollar amount for Savings Target."
+            return
+        }
+
+        var p = store.profile
+        p.tenantId = store.activeTenantId
+        p.preferredName = resolvedDisplayName
+        p.typicalTakeHomePayCents = payCents
+        p.savingsTargetPerPeriodCents = savCents
+
+        do {
+            try store.updateProfile(p)
+            syncDrafts()
+            store.statusBannerMessage = "Saved profile & pay-cycle settings."
+            withAnimation(.easeInOut(duration: 0.2)) {
+                saveFeedbackMessage = "Saved \(store.profile.payFrequency.displayName.lowercased()) pay (\(AustralianMoneyFormatter.format(cents: payCents))) and savings target (\(AustralianMoneyFormatter.format(cents: savCents)))."
+                didJustSave = true
+            }
+            #if canImport(UIKit)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(3))
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    didJustSave = false
+                }
+            }
+        } catch {
+            saveErrorMessage = "Unable to save settings: \(error.localizedDescription)"
         }
     }
 
@@ -577,24 +824,39 @@ public struct SettingsPrivacyView: View {
                 HStack {
                     Label("Appearance", systemImage: "circle.lefthalf.filled")
                         .font(.subheadline)
+
                     Spacer()
-                    Picker(
-                        "Theme",
-                        selection: Binding(
-                            get: { store.profile.themePreference },
-                            set: { pref in
-                                var p = store.profile
-                                p.themePreference = pref
-                                try? store.updateProfile(p)
-                            }
-                        )
-                    ) {
+
+                    let currentPreference = store.profile.themePreference
+                    Menu {
                         ForEach(AppThemePreference.allCases) { pref in
-                            Text(pref.displayName).tag(pref)
+                            Button {
+                                var profile = store.profile
+                                profile.themePreference = pref
+                                try? store.updateProfile(profile)
+                            } label: {
+                                if pref == currentPreference {
+                                    Label(pref.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(pref.displayName)
+                                }
+                            }
                         }
+                    } label: {
+                        DaylightDropdownPill(currentPreference.displayName, icon: "paintbrush")
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 210)
+                    .accessibilityLabel("Appearance")
+                    .accessibilityValue(currentPreference.displayName)
+                }
+
+                Divider()
+
+                settingsNavigationRow(
+                    title: "How Is Safe-to-Spend Calculated?",
+                    subtitle: "See income, bills, savings, spending, and remaining days",
+                    icon: "function"
+                ) {
+                    store.showingCalculationExplainer = true
                 }
 
                 Divider()
@@ -610,7 +872,7 @@ public struct SettingsPrivacyView: View {
                 Divider()
 
                 settingsNavigationRow(
-                    title: "Notifications & Quiet Hours",
+                    title: "Notifications",
                     subtitle: "Daily summary time and lock-screen privacy",
                     icon: "bell.badge.fill"
                 ) {
@@ -689,14 +951,40 @@ public struct SettingsPrivacyView: View {
 
     private var dataExportAndPrivacyCard: some View {
         DaylightCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Data & Privacy")
-                    .font(.headline)
+            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
+                HStack(alignment: .top, spacing: DaylightTheme.Spacing.sm) {
+                    Image(systemName: "lock.shield.fill")
+                        .font(.title3)
+                        .foregroundStyle(DaylightTheme.accent)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(DaylightTheme.accent.opacity(0.12)))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Data & Privacy")
+                            .font(.headline)
+                        Text("Review, export & organise your finances")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: DaylightTheme.Spacing.xs)
+                    exportPrivacyBadge
+                }
+
+                Divider()
 
                 HStack {
-                    Text("Export Range")
-                        .font(.subheadline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Transactions to export")
+                            .font(.subheadline)
+                        Text("Transactions within your selected date range")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Spacer()
+
                     Menu {
                         ForEach(ExportDateRangeOption.allCases) { opt in
                             Button {
@@ -710,11 +998,13 @@ public struct SettingsPrivacyView: View {
                             }
                         }
                     } label: {
-                        compactDropdownLabel(selectedExportDateRange.rawValue)
+                        DaylightDropdownPill(selectedExportDateRange.rawValue, icon: "calendar")
                     }
+                    .accessibilityLabel("Transactions to export")
+                    .accessibilityValue(selectedExportDateRange.rawValue)
                 }
 
-                HStack(spacing: 10) {
+                HStack(spacing: DaylightTheme.Spacing.xs) {
                     Button {
                         let bounds = resolvedExportBounds()
                         let csvText = store.exportTransactionsAsSanitizedCSV(fromDate: bounds.from, toDate: bounds.to)
@@ -722,12 +1012,13 @@ public struct SettingsPrivacyView: View {
                         exportDefaultFilename = "Daylight_Transactions_\(AustralianDateHelper.formatISODate(store.referenceDate, timeZoneId: store.profile.timeZoneId)).csv"
                         showingSystemFileExporter = true
                     } label: {
-                        Label("Export CSV", systemImage: "square.and.arrow.up")
+                        Label("Save CSV", systemImage: "square.and.arrow.up")
                             .font(.subheadline.weight(.medium))
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(DaylightTheme.forestGreen)
+                    .tint(DaylightTheme.primaryAction)
+                    .accessibilityHint("Choose a secure location before saving your export.")
 
                     Button {
                         let bounds = resolvedExportBounds()
@@ -736,18 +1027,19 @@ public struct SettingsPrivacyView: View {
                         exportedDocumentContent = csvText
                         showingExportSheet = true
                     } label: {
-                        Label("Preview CSV", systemImage: "doc.text.magnifyingglass")
+                        Label("Review CSV", systemImage: "doc.text.magnifyingglass")
                             .font(.subheadline.weight(.medium))
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityHint("Review export contents before saving or sharing.")
                 }
 
                 Divider()
 
                 settingsNavigationRow(
-                    title: "Export Full Workspace JSON",
-                    subtitle: "Complete portable archive of your workspace",
+                    title: "Review Full Workspace Archive",
+                    subtitle: "Check the complete archive before saving or sharing it",
                     icon: "curlybraces"
                 ) {
                     exportedDocumentTitle = "Workspace Archive (\(store.activeTenantId))"
@@ -768,14 +1060,33 @@ public struct SettingsPrivacyView: View {
                 Divider()
 
                 settingsNavigationRow(
-                    title: "Australian Privacy & Security Specs",
-                    subtitle: "Privacy Act 1988 (Cth), CDR & SQLite architecture",
+                    title: "Privacy & Security Information",
+                    subtitle: "How your data, exports, and privacy settings are handled",
                     icon: "checkmark.shield.fill"
                 ) {
                     showingArchitectureDocsSheet = true
                 }
             }
         }
+    }
+
+    /// Compact capsule shown beside the "Data & Privacy" title.
+    private var exportPrivacyBadge: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.caption2)
+            Text("Secure Exports")
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(DaylightTheme.warning)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            Capsule().fill(DaylightTheme.warning.opacity(0.14))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Secure Exports")
     }
 
     private func resolvedExportBounds() -> (from: Date?, to: Date?) {
@@ -806,7 +1117,7 @@ public struct SettingsPrivacyView: View {
                     Text(
                         store.isDemoMode
                             ? "Restore synthetic demo transactions and budgets to defaults."
-                            : "Permanently delete all local accounts, transactions, and budgets."
+                            : "Delete all accounts, & transactions."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

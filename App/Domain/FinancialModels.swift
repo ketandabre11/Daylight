@@ -33,8 +33,8 @@ public enum AustralianMoneyFormatter {
     /// Formats integer cents into standard Australian currency display (e.g., `$1,250.00` or `-$42.50`).
     public static func format(cents: MoneyCents, showPlusForPositive: Bool = false) -> String {
         let isNegative = cents < 0
-        let absCents = abs(cents)
-        let decimalAmount = Decimal(absCents) / Decimal(100)
+        let absCents = cents == Int64.min ? Decimal(Int64.max) + 1 : Decimal(abs(cents))
+        let decimalAmount = absCents / Decimal(100)
         let formattedAbs = audFormatter.string(from: decimalAmount as NSDecimalNumber) ?? "$0.00"
         if isNegative {
             return "-\(formattedAbs)"
@@ -47,10 +47,20 @@ public enum AustralianMoneyFormatter {
     /// Formats integer cents to nearest whole dollar when compact display is appropriate.
     public static func formatWholeDollars(cents: MoneyCents) -> String {
         let isNegative = cents < 0
-        let absCents = abs(cents)
-        let roundedDollars = Decimal(absCents) / Decimal(100)
+        let absCents = cents == Int64.min ? Decimal(Int64.max) + 1 : Decimal(abs(cents))
+        let roundedDollars = absCents / Decimal(100)
         let formattedAbs = wholeDollarFormatter.string(from: roundedDollars as NSDecimalNumber) ?? "$0"
         return isNegative ? "-\(formattedAbs)" : formattedAbs
+    }
+
+    /// Formats integer cents into an exact plain decimal string (e.g., `"380.00"`) for text fields without binary floating-point conversion.
+    public static func formatEditableDecimal(cents: MoneyCents) -> String {
+        let isNegative = cents < 0
+        let absCents = cents == Int64.min ? UInt64(Int64.max) + 1 : UInt64(abs(cents))
+        let dollars = absCents / 100
+        let remainder = absCents % 100
+        let prefix = isNegative ? "-" : ""
+        return "\(prefix)\(dollars).\(String(format: "%02llu", remainder))"
     }
 
     /// Safely parses user-entered dollar string (e.g., `"1,250.50"`, `"$84.95"`, `"-12.30"`, `"(120.00)"`) into integer cents.
@@ -72,8 +82,16 @@ public enum AustralianMoneyFormatter {
         var multiplied = decimalValue * Decimal(100)
         var rounded = Decimal()
         NSDecimalRound(&rounded, &multiplied, 0, .bankers)
-        let cents = NSDecimalNumber(decimal: rounded).int64Value
-        return isParentheticalNegative ? -abs(cents) : cents
+        let decimalNumber = NSDecimalNumber(decimal: rounded)
+        let magnitude = decimalNumber.decimalValue < 0 ? -decimalNumber.decimalValue : decimalNumber.decimalValue
+        guard magnitude <= Decimal(Int64.max) + 1 else {
+            return nil
+        }
+        if magnitude == Decimal(Int64.max) + 1 {
+            return decimalNumber.decimalValue < 0 ? Int64.min : nil
+        }
+        let cents = decimalNumber.int64Value
+        return isParentheticalNegative ? -cents : cents
     }
 }
 
@@ -223,35 +241,35 @@ public enum AustralianCategory: String, Codable, CaseIterable, Identifiable, Sen
     public var id: String { rawValue }
 
     public var displayName: String {
-        switch self {
-        case .rentAndMortgage: return "Rent & Mortgage"
-        case .groceries: return "Groceries & Supermarkets"
-        case .cafesAndTakeaway: return "Cafes, Coffee & Takeaway"
-        case .restaurantsAndDelivery: return "Restaurants & Food Delivery"
-        case .publicTransport: return "Public Transport (Opal / Myki)"
-        case .fuelTollsVehicle: return "Fuel, Tolls, Parking & Vehicle"
-        case .utilitiesAndInternet: return "Electricity, Gas, Water & Internet"
-        case .mobilePhone: return "Mobile Phone Bills"
-        case .insurance: return "Insurance"
-        case .healthcareMedicare: return "Healthcare, Medicare & Pharmacy"
-        case .childcareEducation: return "Childcare & Education"
-        case .hecsHelp: return "HECS-HELP & Student Commitments"
-        case .councilRatesStrata: return "Council Rates & Strata"
-        case .gymFitness: return "Gym & Fitness"
-        case .streamingSubscriptions: return "Streaming & Subscriptions"
-        case .shoppingRetail: return "Shopping & Retail"
-        case .domesticTravelHolidays: return "Domestic Travel & Holidays"
-        case .buyNowPayLater: return "Buy Now, Pay Later (BNPL)"
-        case .creditCardRepayment: return "Credit Card Repayments"
-        case .personalLoansDebt: return "Personal Loans & Debt"
-        case .salaryWagesIncome: return "Salary, Wages & Contractor Income"
-        case .governmentPayments: return "Government & Family Payments"
-        case .superannuation: return "Superannuation Contributions"
-        case .bankFeesInterestRefunds: return "Bank Fees, Interest & Refunds"
-        case .ownAccountTransfer: return "Transfers Between Own Accounts"
-        case .cashAndUnclassified: return "Cash Withdrawals & Unclassified"
-        }
+    switch self {
+    case .rentAndMortgage: return "Rent & Mortgage"
+    case .groceries: return "Groceries & Supermarkets"
+    case .cafesAndTakeaway: return "Cafes & Takeaway"
+    case .restaurantsAndDelivery: return "Restaurants & Delivery"
+    case .publicTransport: return "Public Transport"
+    case .fuelTollsVehicle: return "Fuel, Tolls & Parking"
+    case .utilitiesAndInternet: return "Utilities & Internet"
+    case .mobilePhone: return "Mobile Phone Bills"
+    case .insurance: return "Insurance Payments"
+    case .healthcareMedicare: return "Healthcare & Pharmacy"
+    case .childcareEducation: return "Childcare & Education"
+    case .hecsHelp: return "HECS & Student Loans"
+    case .councilRatesStrata: return "Council & Strata Rates"
+    case .gymFitness: return "Gym & Fitness"
+    case .streamingSubscriptions: return "Streaming & Subscriptions"
+    case .shoppingRetail: return "Shopping & Retail"
+    case .domesticTravelHolidays: return "Travel & Holidays"
+    case .buyNowPayLater: return "Buy Now PayLater"
+    case .creditCardRepayment: return "Credit Card Repayments"
+    case .personalLoansDebt: return "Personal Loans & Debt"
+    case .salaryWagesIncome: return "Salary & Wages"
+    case .governmentPayments: return "Government Support Payments"
+    case .superannuation: return "Superannuation Contributions"
+    case .bankFeesInterestRefunds: return "Bank Fees & Refunds"
+    case .ownAccountTransfer: return "Own Account Transfers"
+    case .cashAndUnclassified: return "Cash & Unclassified"
     }
+}
 
     public var symbolName: String {
         switch self {
@@ -361,6 +379,36 @@ public enum PayFrequency: String, Codable, CaseIterable, Identifiable, Sendable 
         }
     }
 
+    public var shortPeriodLabel: String {
+        switch self {
+        case .weekly: return "week"
+        case .fortnightly: return "fortnight"
+        case .monthly: return "month"
+        case .irregular: return "28d cycle"
+        }
+    }
+
+    /// Exact number of periods in one standard Australian financial year (52 weeks, 26 fortnights, 12 calendar months, 13 four-week cycles).
+    /// Used for deterministic integer-cent cross-period calculation conversions without arbitrary 30-day monthly drift.
+    public var annualCyclesCount: Int {
+        switch self {
+        case .weekly: return 52
+        case .fortnightly: return 26
+        case .monthly: return 12
+        case .irregular: return 13
+        }
+    }
+
+    /// Exact day count for fixed-length cycles, or `nil` for calendar-based monthly cycles.
+    public var fixedCycleDays: Int? {
+        switch self {
+        case .weekly: return 7
+        case .fortnightly: return 14
+        case .monthly: return nil
+        case .irregular: return 28
+        }
+    }
+
     public var nominalPeriodDays: Int {
         switch self {
         case .weekly: return 7
@@ -430,8 +478,96 @@ public struct UserProfile: Codable, Identifiable, Equatable, Sendable {
     public var enableBudgetRollover: Bool
     public var themePreference: AppThemePreference
     public var onboardingCompleted: Bool
+    public var avatarImageData: Data?
     public var createdAt: Date
     public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        tenantId: String,
+        preferredName: String,
+        email: String,
+        countryCode: String = "AU",
+        currencyCode: String = "AUD",
+        timeZoneId: String = "Australia/Sydney",
+        employmentType: EmploymentIncomeType,
+        payFrequency: PayFrequency,
+        typicalTakeHomePayCents: MoneyCents,
+        nextPayDate: Date,
+        savingsTargetPerPeriodCents: MoneyCents,
+        customFlexibleCapCents: MoneyCents? = nil,
+        preferredBudgetingMethod: BudgetingMethod,
+        enableBudgetRollover: Bool = false,
+        themePreference: AppThemePreference = .system,
+        onboardingCompleted: Bool = false,
+        avatarImageData: Data? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.tenantId = tenantId
+        self.preferredName = preferredName
+        self.email = email
+        self.countryCode = countryCode
+        self.currencyCode = currencyCode
+        self.timeZoneId = timeZoneId
+        self.employmentType = employmentType
+        self.payFrequency = payFrequency
+        self.typicalTakeHomePayCents = typicalTakeHomePayCents
+        self.nextPayDate = nextPayDate
+        self.savingsTargetPerPeriodCents = savingsTargetPerPeriodCents
+        self.customFlexibleCapCents = customFlexibleCapCents
+        self.preferredBudgetingMethod = preferredBudgetingMethod
+        self.enableBudgetRollover = enableBudgetRollover
+        self.themePreference = themePreference
+        self.onboardingCompleted = onboardingCompleted
+        self.avatarImageData = avatarImageData
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, tenantId, preferredName, email, countryCode, currencyCode, timeZoneId
+        case employmentType, payFrequency, typicalTakeHomePayCents, nextPayDate
+        case savingsTargetPerPeriodCents, customFlexibleCapCents, preferredBudgetingMethod
+        case enableBudgetRollover, themePreference, onboardingCompleted
+        case avatarImageData, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.tenantId = try container.decode(String.self, forKey: .tenantId)
+        self.preferredName = try container.decode(String.self, forKey: .preferredName)
+        self.email = try container.decode(String.self, forKey: .email)
+        self.countryCode = try container.decodeIfPresent(String.self, forKey: .countryCode) ?? "AU"
+        self.currencyCode = try container.decodeIfPresent(String.self, forKey: .currencyCode) ?? "AUD"
+        self.timeZoneId = try container.decodeIfPresent(String.self, forKey: .timeZoneId) ?? "Australia/Sydney"
+        self.employmentType = try container.decode(EmploymentIncomeType.self, forKey: .employmentType)
+        self.payFrequency = try container.decode(PayFrequency.self, forKey: .payFrequency)
+        self.typicalTakeHomePayCents = try container.decode(MoneyCents.self, forKey: .typicalTakeHomePayCents)
+        self.nextPayDate = try container.decode(Date.self, forKey: .nextPayDate)
+        self.savingsTargetPerPeriodCents = try container.decode(MoneyCents.self, forKey: .savingsTargetPerPeriodCents)
+        self.customFlexibleCapCents = try container.decodeIfPresent(MoneyCents.self, forKey: .customFlexibleCapCents)
+        self.preferredBudgetingMethod = try container.decode(BudgetingMethod.self, forKey: .preferredBudgetingMethod)
+        self.enableBudgetRollover = try container.decodeIfPresent(Bool.self, forKey: .enableBudgetRollover) ?? false
+        self.themePreference = try container.decodeIfPresent(AppThemePreference.self, forKey: .themePreference) ?? .system
+        self.onboardingCompleted = try container.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? false
+        self.avatarImageData = try container.decodeIfPresent(Data.self, forKey: .avatarImageData)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public var initials: String {
+        let trimmed = preferredName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: " ").filter { !$0.isEmpty }
+        if parts.count >= 2, let first = parts.first?.first, let second = parts.dropFirst().first?.first {
+            return "\(first)\(second)".uppercased()
+        } else if let first = trimmed.first {
+            return String(first).uppercased()
+        }
+        return "D"
+    }
 }
 
 // MARK: - Accounts, Open Banking (CDR) Connections & Consents
@@ -629,6 +765,7 @@ public struct TransactionRecord: Codable, Identifiable, Equatable, Sendable {
     public var userNote: String
     public var excludeFromBudget: Bool
     public var linkedOriginalTransactionId: UUID? // For refunds or reversals linked to original purchase
+    public var linkedFixedCommitmentId: UUID? = nil // Optional explicit reconciliation link to a FixedCommitment
     public var splits: [TransactionSplit]
     public var calculationVersion: Int
     public var updatedAt: Date
@@ -665,19 +802,90 @@ public struct CategoryBudget: Codable, Identifiable, Equatable, Sendable {
     public var rolloverEnabled: Bool
     public var rolloverBalanceCents: MoneyCents
     public var periodType: PayFrequency
+    public var linkedFixedCommitmentId: UUID? = nil
     public var updatedAt: Date
+}
+
+public enum FixedReconciliationNoticeKind: String, Codable, Equatable, Sendable {
+    case mismatchedCommitmentAndCategoryLimit = "mismatched_commitment_and_category_limit"
+    case unmatchedTransactionInFixedCategory = "unmatched_transaction_in_fixed_category"
+    case categoryLimitWithoutFixedCommitment = "category_limit_without_fixed_commitment"
+}
+
+public struct FixedReconciliationNotice: Identifiable, Codable, Equatable, Sendable {
+    public var id: String { "\(kind.rawValue)_\(category.rawValue)" }
+    public let kind: FixedReconciliationNoticeKind
+    public let category: AustralianCategory
+    public let message: String
+    public let reservedCents: MoneyCents
+
+    public init(
+        kind: FixedReconciliationNoticeKind,
+        category: AustralianCategory,
+        message: String,
+        reservedCents: MoneyCents
+    ) {
+        self.kind = kind
+        self.category = category
+        self.message = message
+        self.reservedCents = reservedCents
+    }
 }
 
 public struct CategoryBudgetProgress: Identifiable, Equatable, Sendable {
     public var id: String { category.rawValue }
     public let category: AustralianCategory
+    /// Effective display limit in the category budget's own configured `sourcePeriodType` (`baseLimitCents + rolloverAppliedCents`).
     public let budgetedCents: MoneyCents
+    /// Stored base limit in the category budget's own configured `sourcePeriodType` (never converted to profile pay cycle for display).
+    public let baseLimitCents: MoneyCents
+    public let rolloverAppliedCents: MoneyCents
+    public let sourceLimitCents: MoneyCents
+    public let sourcePeriodType: PayFrequency
+    /// Calculation-only equivalent normalized to the user's active budget period for cross-period summaries.
+    public let normalizedActivePeriodLimitCents: MoneyCents
+    public let periodStart: Date?
+    public let periodEnd: Date?
     public let netSpentCents: MoneyCents
     public let remainingCents: MoneyCents
     public let percentageUsed: Double
     public let projectedEndOfPeriodCents: MoneyCents
     public let isOverBudget: Bool
     public let recentTransactions: [TransactionRecord]
+
+    public init(
+        category: AustralianCategory,
+        budgetedCents: MoneyCents,
+        baseLimitCents: MoneyCents = 0,
+        rolloverAppliedCents: MoneyCents = 0,
+        sourceLimitCents: MoneyCents = 0,
+        sourcePeriodType: PayFrequency = .fortnightly,
+        normalizedActivePeriodLimitCents: MoneyCents? = nil,
+        periodStart: Date? = nil,
+        periodEnd: Date? = nil,
+        netSpentCents: MoneyCents,
+        remainingCents: MoneyCents,
+        percentageUsed: Double,
+        projectedEndOfPeriodCents: MoneyCents,
+        isOverBudget: Bool,
+        recentTransactions: [TransactionRecord]
+    ) {
+        self.category = category
+        self.budgetedCents = budgetedCents
+        self.baseLimitCents = baseLimitCents
+        self.rolloverAppliedCents = rolloverAppliedCents
+        self.sourceLimitCents = sourceLimitCents
+        self.sourcePeriodType = sourcePeriodType
+        self.normalizedActivePeriodLimitCents = normalizedActivePeriodLimitCents ?? budgetedCents
+        self.periodStart = periodStart
+        self.periodEnd = periodEnd
+        self.netSpentCents = netSpentCents
+        self.remainingCents = remainingCents
+        self.percentageUsed = percentageUsed
+        self.projectedEndOfPeriodCents = projectedEndOfPeriodCents
+        self.isOverBudget = isOverBudget
+        self.recentTransactions = recentTransactions
+    }
 }
 
 /// Authoritative output from `FinancialCalculationEngine` answering the 5 core user questions.
@@ -716,8 +924,65 @@ public struct DailyAllowanceSummary: Equatable, Sendable {
 
     /// Human-readable step-by-step audit explanation of how the figure was derived.
     public let calculationSteps: [String]
+    public let reconciliationNotices: [FixedReconciliationNotice]
     public let budgetingMethodUsed: BudgetingMethod
     public let calculationVersion: Int
+
+    public init(
+        periodStart: Date,
+        periodEnd: Date,
+        totalDaysInPeriod: Int,
+        elapsedDaysInPeriod: Int,
+        remainingDaysInPeriod: Int,
+        everydayAvailableBankBalanceCents: MoneyCents,
+        totalLiquidCashAcrossAccountsCents: MoneyCents,
+        totalCreditCardAndDebtBalanceCents: MoneyCents,
+        periodTakeHomeIncomeCents: MoneyCents,
+        totalFixedCommitmentsForPeriodCents: MoneyCents,
+        unpaidFixedCommitmentsRemainingCents: MoneyCents,
+        plannedSavingsForPeriodCents: MoneyCents,
+        availableCashAfterCommitmentsCents: MoneyCents,
+        totalFlexibleBudgetForPeriodCents: MoneyCents,
+        baselineDailyAllowanceCents: MoneyCents,
+        flexibleSpentPriorToTodayCents: MoneyCents,
+        flexibleSpentTodayCents: MoneyCents,
+        totalFlexibleSpentInPeriodCents: MoneyCents,
+        remainingFlexibleBudgetForPeriodCents: MoneyCents,
+        todaysStartingAllowanceCents: MoneyCents,
+        todaysRemainingAllowanceCents: MoneyCents,
+        forecastEndOfPeriodFlexibleSpendCents: MoneyCents,
+        calculationSteps: [String],
+        reconciliationNotices: [FixedReconciliationNotice] = [],
+        budgetingMethodUsed: BudgetingMethod,
+        calculationVersion: Int
+    ) {
+        self.periodStart = periodStart
+        self.periodEnd = periodEnd
+        self.totalDaysInPeriod = totalDaysInPeriod
+        self.elapsedDaysInPeriod = elapsedDaysInPeriod
+        self.remainingDaysInPeriod = remainingDaysInPeriod
+        self.everydayAvailableBankBalanceCents = everydayAvailableBankBalanceCents
+        self.totalLiquidCashAcrossAccountsCents = totalLiquidCashAcrossAccountsCents
+        self.totalCreditCardAndDebtBalanceCents = totalCreditCardAndDebtBalanceCents
+        self.periodTakeHomeIncomeCents = periodTakeHomeIncomeCents
+        self.totalFixedCommitmentsForPeriodCents = totalFixedCommitmentsForPeriodCents
+        self.unpaidFixedCommitmentsRemainingCents = unpaidFixedCommitmentsRemainingCents
+        self.plannedSavingsForPeriodCents = plannedSavingsForPeriodCents
+        self.availableCashAfterCommitmentsCents = availableCashAfterCommitmentsCents
+        self.totalFlexibleBudgetForPeriodCents = totalFlexibleBudgetForPeriodCents
+        self.baselineDailyAllowanceCents = baselineDailyAllowanceCents
+        self.flexibleSpentPriorToTodayCents = flexibleSpentPriorToTodayCents
+        self.flexibleSpentTodayCents = flexibleSpentTodayCents
+        self.totalFlexibleSpentInPeriodCents = totalFlexibleSpentInPeriodCents
+        self.remainingFlexibleBudgetForPeriodCents = remainingFlexibleBudgetForPeriodCents
+        self.todaysStartingAllowanceCents = todaysStartingAllowanceCents
+        self.todaysRemainingAllowanceCents = todaysRemainingAllowanceCents
+        self.forecastEndOfPeriodFlexibleSpendCents = forecastEndOfPeriodFlexibleSpendCents
+        self.calculationSteps = calculationSteps
+        self.reconciliationNotices = reconciliationNotices
+        self.budgetingMethodUsed = budgetingMethodUsed
+        self.calculationVersion = calculationVersion
+    }
 }
 
 // MARK: - Recurring Payment Predictions (Bills & Subscriptions)
@@ -828,6 +1093,7 @@ public struct FinancialInsight: Identifiable, Equatable, Sendable {
 }
 
 public struct NotificationPreferences: Codable, Equatable, Sendable {
+    public var notificationsEnabled: Bool
     public var dailySummaryEnabled: Bool
     public var dailySummaryHour: Int // e.g. 19 (7:00 PM local)
     public var budgetThresholdAlertsEnabled: Bool
@@ -836,6 +1102,48 @@ public struct NotificationPreferences: Codable, Equatable, Sendable {
     public var recurringChangeAlertsEnabled: Bool
     public var unusualSpendingAlertsEnabled: Bool
     public var hideExactAmountsInPreviews: Bool
+
+    public init(
+        notificationsEnabled: Bool = true,
+        dailySummaryEnabled: Bool = true,
+        dailySummaryHour: Int = 19,
+        budgetThresholdAlertsEnabled: Bool = true,
+        upcomingBillRemindersEnabled: Bool = true,
+        paydayRemindersEnabled: Bool = true,
+        recurringChangeAlertsEnabled: Bool = true,
+        unusualSpendingAlertsEnabled: Bool = true,
+        hideExactAmountsInPreviews: Bool = true
+    ) {
+        self.notificationsEnabled = notificationsEnabled
+        self.dailySummaryEnabled = dailySummaryEnabled
+        self.dailySummaryHour = dailySummaryHour
+        self.budgetThresholdAlertsEnabled = budgetThresholdAlertsEnabled
+        self.upcomingBillRemindersEnabled = upcomingBillRemindersEnabled
+        self.paydayRemindersEnabled = paydayRemindersEnabled
+        self.recurringChangeAlertsEnabled = recurringChangeAlertsEnabled
+        self.unusualSpendingAlertsEnabled = unusualSpendingAlertsEnabled
+        self.hideExactAmountsInPreviews = hideExactAmountsInPreviews
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case notificationsEnabled, dailySummaryEnabled, dailySummaryHour
+        case budgetThresholdAlertsEnabled, upcomingBillRemindersEnabled
+        case paydayRemindersEnabled, recurringChangeAlertsEnabled
+        case unusualSpendingAlertsEnabled, hideExactAmountsInPreviews
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        notificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled) ?? true
+        dailySummaryEnabled = try container.decodeIfPresent(Bool.self, forKey: .dailySummaryEnabled) ?? true
+        dailySummaryHour = try container.decodeIfPresent(Int.self, forKey: .dailySummaryHour) ?? 19
+        budgetThresholdAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .budgetThresholdAlertsEnabled) ?? true
+        upcomingBillRemindersEnabled = try container.decodeIfPresent(Bool.self, forKey: .upcomingBillRemindersEnabled) ?? true
+        paydayRemindersEnabled = try container.decodeIfPresent(Bool.self, forKey: .paydayRemindersEnabled) ?? true
+        recurringChangeAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .recurringChangeAlertsEnabled) ?? true
+        unusualSpendingAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .unusualSpendingAlertsEnabled) ?? true
+        hideExactAmountsInPreviews = try container.decodeIfPresent(Bool.self, forKey: .hideExactAmountsInPreviews) ?? true
+    }
 }
 
 public struct AppNotification: Codable, Identifiable, Equatable, Sendable {
@@ -846,6 +1154,56 @@ public struct AppNotification: Codable, Identifiable, Equatable, Sendable {
     public var categoryTag: String
     public var createdAt: Date
     public var isRead: Bool
+    public var notificationType: String
+    public var relatedEntityID: String?
+    public var targetSectionRawValue: String?
+    public var eventIdentifier: String?
+
+    public init(
+        id: UUID,
+        tenantId: String,
+        title: String,
+        body: String,
+        categoryTag: String,
+        createdAt: Date,
+        isRead: Bool,
+        notificationType: String? = nil,
+        relatedEntityID: String? = nil,
+        targetSectionRawValue: String? = nil,
+        eventIdentifier: String? = nil
+    ) {
+        self.id = id
+        self.tenantId = tenantId
+        self.title = title
+        self.body = body
+        self.categoryTag = categoryTag
+        self.createdAt = createdAt
+        self.isRead = isRead
+        self.notificationType = notificationType ?? categoryTag
+        self.relatedEntityID = relatedEntityID
+        self.targetSectionRawValue = targetSectionRawValue
+        self.eventIdentifier = eventIdentifier
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, tenantId, title, body, categoryTag, createdAt, isRead
+        case notificationType, relatedEntityID, targetSectionRawValue, eventIdentifier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        tenantId = try container.decode(String.self, forKey: .tenantId)
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        categoryTag = try container.decode(String.self, forKey: .categoryTag)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        isRead = try container.decodeIfPresent(Bool.self, forKey: .isRead) ?? false
+        notificationType = try container.decodeIfPresent(String.self, forKey: .notificationType) ?? categoryTag
+        relatedEntityID = try container.decodeIfPresent(String.self, forKey: .relatedEntityID)
+        targetSectionRawValue = try container.decodeIfPresent(String.self, forKey: .targetSectionRawValue)
+        eventIdentifier = try container.decodeIfPresent(String.self, forKey: .eventIdentifier)
+    }
 }
 
 // MARK: - Statement Import & Audit Events
@@ -987,4 +1345,3 @@ public struct AppSessionRecord: Codable, Identifiable, Equatable, Sendable {
     public var lastActiveAt: Date
     public var isActive: Bool
 }
-

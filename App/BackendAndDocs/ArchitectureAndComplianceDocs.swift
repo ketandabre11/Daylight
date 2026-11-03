@@ -426,30 +426,59 @@ public enum ArchitectureDocumentationCatalog {
 
 public struct ArchitectureAndComplianceInspectorSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedTab: Int = 0
+    @Environment(\.colorScheme) private var colorScheme
 
     public init() {}
 
     public var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Section", selection: $selectedTab) {
-                    Text("PostgreSQL Schema (22 Tables)").tag(0)
-                    Text("AU Compliance & Threat Model").tag(1)
-                    Text("API & DR Runbook").tag(2)
-                }
-                .pickerStyle(.segmented)
-                .padding()
+            ScrollView {
+                VStack(alignment: .leading, spacing: DaylightTheme.Spacing.lg) {
+                    PrivacySecurityHero()
 
-                ScrollView {
-                    Text(currentContent)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    PrivacySecurityInformationCard(
+                        icon: "person.crop.circle.badge.checkmark",
+                        title: "Your workspace",
+                        message: "Your profile, accounts, budgets, and transactions are used to provide the features you choose in Daylight."
+                    )
+
+                    PrivacySecurityInformationCard(
+                        icon: "square.and.arrow.up",
+                        title: "Exports stay in your control",
+                        message: "When you export data, you choose where to save it. Review export files carefully, as they can contain sensitive financial information."
+                    )
+
+                    PrivacySecurityInformationCard(
+                        icon: "calendar.badge.clock",
+                        title: "Choose what to export",
+                        message: "CSV exports include only the period you select. A full workspace archive can include your broader workspace information, so review it before sharing."
+                    )
+
+                    PrivacySecurityInformationCard(
+                        icon: "trash",
+                        title: "You can delete your data",
+                        message: "The Delete Workspace option in Settings permanently removes the current workspace data after confirmation."
+                    )
+
+                    VStack(alignment: .leading, spacing: DaylightTheme.Spacing.xs) {
+                        Label("Need help with privacy?", systemImage: "questionmark.circle")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Contact (daylight.support@gmail.com) if you have a question about your data or privacy settings.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(DaylightTheme.Spacing.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                            .fill(DaylightTheme.secondarySurface(for: colorScheme))
+                    )
                 }
+                .padding(DaylightTheme.Spacing.md)
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Architecture & Compliance Specs")
+            .navigationTitle("Privacy & Security")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -460,12 +489,72 @@ public struct ArchitectureAndComplianceInspectorSheet: View {
             }
         }
     }
+}
 
-    private var currentContent: String {
-        switch selectedTab {
-        case 0: return ArchitectureDocumentationCatalog.postgresMigrationSQL
-        case 1: return ArchitectureDocumentationCatalog.australianComplianceChecklistMarkdown
-        default: return ArchitectureDocumentationCatalog.apiAndOperationsGuideMarkdown
+private struct PrivacySecurityHero: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DaylightTheme.Spacing.sm) {
+            Image(systemName: "lock.shield.fill")
+                .font(.title2)
+                .foregroundStyle(DaylightTheme.accent)
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(DaylightTheme.accent.opacity(0.12)))
+
+            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.xxs) {
+                Text("Your data, explained simply")
+                    .font(.title3.weight(.semibold))
+                Text("Understand what is included in your workspace and make informed choices when exporting or deleting it.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .padding(DaylightTheme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                .fill(DaylightTheme.sageSurface(for: colorScheme))
+        )
+    }
+}
+
+private struct PrivacySecurityInformationCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let icon: String
+    let title: LocalizedStringKey
+    let message: LocalizedStringKey
+
+    var body: some View {
+        HStack(alignment: .top, spacing: DaylightTheme.Spacing.sm) {
+            Image(systemName: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(DaylightTheme.accent)
+                .frame(width: 32, height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                        .fill(DaylightTheme.accent.opacity(0.12))
+                )
+
+            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.xxs) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(DaylightTheme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                .fill(DaylightTheme.surface(for: colorScheme))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.md, style: .continuous)
+                .strokeBorder(DaylightTheme.border(for: colorScheme), lineWidth: 1)
+        )
     }
 }

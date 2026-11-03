@@ -1,15 +1,32 @@
 import SwiftUI
+import PhotosUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct OverviewDashboardView: View {
     @Bindable var store: DaylightStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @StateObject private var greetingCoordinator: TimeBasedGreetingCoordinator
+    @Binding private var isNavigationBarCompact: Bool
 
     @State private var showingQuickAddTransaction = false
+    @State private var showingRegulatoryDisclaimer = false
+    @State private var showingAccountBalances = false
     @State private var selectedTransactionForDetail: TransactionRecord? = nil
-
-    public init(store: DaylightStore) {
+    @State private var isAmountsHidden = false
+    public init(
+        store: DaylightStore,
+        greetingCoordinator: TimeBasedGreetingCoordinator? = nil,
+        isNavigationBarCompact: Binding<Bool> = .constant(false)
+    ) {
         self.store = store
+        self._greetingCoordinator = StateObject(wrappedValue: greetingCoordinator ?? TimeBasedGreetingCoordinator())
+        self._isNavigationBarCompact = isNavigationBarCompact
     }
 
     private var summary: DailyAllowanceSummary {
@@ -28,131 +45,214 @@ public struct OverviewDashboardView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.lg) {
-                workspaceModeBanner
-                if let bannerMsg = store.statusBannerMessage {
-                    statusNotificationBanner(bannerMsg)
-                }
-                if store.transactions.isEmpty {
-                    newUserGettingStartedCard
-                }
-                heroSafeToSpendCard
-                balancesVsBudgetComparisonGrid
-                quickActionsRow
+        VStack(spacing: 0) {
+            dashboardTopBar
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: DaylightTheme.Spacing.lg) {
+                        if store.isDemoMode {
+                            demoModeBanner
+                        }
+                        if let bannerMsg = store.statusBannerMessage {
+                            statusNotificationBanner(bannerMsg)
+                        }
+                        if !store.unclassifiedTransactions.isEmpty {
+                            unclassifiedReviewBanner
+                        }
+                        if store.transactions.isEmpty {
+                            newUserGettingStartedCard
+                        }
+
+                        // 1. Safe-to-Spend — the primary visual focus
+                        heroSafeToSpendCard
+
                 if horizontalSizeClass == .regular {
                     HStack(alignment: .top, spacing: DaylightTheme.Spacing.lg) {
                         VStack(spacing: DaylightTheme.Spacing.lg) {
+                            // 2. Spending and budget progress — concise supporting summaries
                             currentBudgetSummaryCard
+                            // 3. Upcoming bills and fixed commitments — only items requiring attention
                             upcomingBillsCard
+                            // 5. Savings progress — a compact summary
                             savingsSnapshotCard
                         }
                         .frame(maxWidth: .infinity)
 
                         VStack(spacing: DaylightTheme.Spacing.lg) {
-                            featuredInsightCard
+                            // 4. Recent transactions — a short preview with an option to view all
                             recentTransactionsCard
+                            // Secondary info: Account balances (progressive disclosure)
+                            accountBalancesCollapsibleSection
+                            if !store.activeInsights.isEmpty {
+                                featuredInsightCard
+                            }
                         }
                         .frame(maxWidth: .infinity)
                     }
                 } else {
+                    // 2. Spending and budget progress — concise supporting summaries
                     currentBudgetSummaryCard
-                    featuredInsightCard
+                    // 3. Upcoming bills and fixed commitments — only items requiring attention
                     upcomingBillsCard
+                    // 4. Recent transactions — a short preview with an option to view all
                     recentTransactionsCard
+                    // 5. Savings progress — a compact summary
                     savingsSnapshotCard
-                }
-                regulatoryFooter
-            }
-            .padding(DaylightTheme.Spacing.md)
-            .frame(maxWidth: 1180)
-            .frame(maxWidth: .infinity)
-        }
-        .refreshable {
-            store.refreshWorkspaceCategories()
-            store.recalculateDerivedState()
-        }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
-        .navigationTitle(greetingTitle)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    store.showingNotificationsSheet = true
-                } label: {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: store.unreadNotificationCount > 0 ? "bell.badge.fill" : "bell")
-                        if store.unreadNotificationCount > 0 {
-                            Text("\(store.unreadNotificationCount)")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(DaylightTheme.cautionRed))
-                                .offset(x: 8, y: -6)
-                        }
+                    // Secondary info: Account balances (progressive disclosure)
+                    accountBalancesCollapsibleSection
+                    if !store.activeInsights.isEmpty {
+                        featuredInsightCard
                     }
                 }
-                .accessibilityLabel("Notifications (\(store.unreadNotificationCount) unread)")
 
-                Button {
-                    showingQuickAddTransaction = true
-                } label: {
-                    Label("Add Transaction", systemImage: "plus.circle.fill")
+                    regulatoryFooter
                 }
+                .padding(DaylightTheme.Spacing.md)
+                .frame(maxWidth: 1180)
+                .frame(maxWidth: .infinity)
             }
+            .refreshable {
+                store.refreshWorkspaceCategories()
+                store.recalculateDerivedState()
+            }
+            .reportsDaylightScrollPosition()
         }
-        .sheet(isPresented: $store.showingCalculationExplainer) {
-            CalculationExplainerSheet(store: store)
-        }
+        .background(DaylightAtmosphericBackground())
+        .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showingQuickAddTransaction) {
             ManualTransactionSheet(store: store)
         }
         .sheet(item: $selectedTransactionForDetail) { tx in
             TransactionDetailSheet(store: store, transaction: tx)
         }
+        .onAppear {
+            isNavigationBarCompact = false
+            greetingCoordinator.handleAppForeground()
+        }
+        .onDisappear {
+            greetingCoordinator.handleAppBackground()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                greetingCoordinator.handleAppForeground()
+            } else {
+                greetingCoordinator.handleAppBackground()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+            greetingCoordinator.handleSystemTimeOrTimezoneChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemClockDidChange)) { _ in
+            greetingCoordinator.handleSystemTimeOrTimezoneChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+            greetingCoordinator.handleSystemTimeOrTimezoneChange()
+        }
+    }
+
+    private var timeGreeting: String {
+        greetingCoordinator.greeting
     }
 
     private var greetingTitle: String {
-        let name = store.profile.preferredName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? BrandConfig.appName : "G'day, \(name)"
+        greetingCoordinator.fullGreeting(for: store.greetingName)
     }
 
-    // MARK: - Demo vs Personal Workspace Banner
+    // MARK: - Dashboard Top Bar (Avatar, Greeting & Actions)
 
-    private var workspaceModeBanner: some View {
-        DaylightCard(padding: 12) {
-            HStack(spacing: 12) {
+    private var dashboardTopBar: some View {
+        HStack(alignment: .center, spacing: isNavigationBarCompact ? 8 : 12) {
+            // Profile Avatar + Personalised Greeting
+            Button {
+                store.selectedSection = .settings
+            } label: {
+                HStack(alignment: .center, spacing: isNavigationBarCompact ? 8 : 10) {
+                    DaylightAvatarView(
+                        avatarImageData: store.profile.avatarImageData,
+                        name: store.greetingName,
+                        size: isNavigationBarCompact ? 32 : 38,
+                        isDemo: store.isDemoMode,
+                        showBorder: true,
+                        borderColor: DaylightTheme.Lime.primary
+                    )
+
+                    VStack(alignment: .leading, spacing: isNavigationBarCompact ? 0 : 2) {
+                        Text(timeGreeting.uppercased())
+                            .font(.system(
+                                size: isNavigationBarCompact ? 8 : 10,
+                                weight: .bold,
+                                design: .rounded
+                            ))
+                            .foregroundStyle(DaylightTheme.Lime.mint)
+                            .tracking(isNavigationBarCompact ? 0.6 : 0.8)
+
+                        Text(store.greetingName)
+                            .font(.system(
+                                isNavigationBarCompact ? .headline : .title3,
+                                design: .rounded,
+                                weight: .bold
+                            ))
+                            .foregroundStyle(DaylightTheme.GlassText.primary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(greetingTitle), Profile & Settings")
+
+            Spacer(minLength: 8)
+
+            // Trailing glass actions (Notifications + Add Transaction)
+            HStack(spacing: 8) {
+                DaylightGlassIconButton(
+                    icon: store.unreadNotificationCount > 0 ? "bell.badge.fill" : "bell",
+                    badgeCount: store.unreadNotificationCount
+                ) {
+                    store.showingNotificationsSheet = true
+                }
+                .accessibilityLabel("Notifications (\(store.unreadNotificationCount) unread)")
+                .scaleEffect(isNavigationBarCompact ? 0.84 : 1)
+
+                DaylightGlassIconButton(icon: "plus") {
+                    showingQuickAddTransaction = true
+                }
+                .accessibilityLabel("Add Transaction")
+                .scaleEffect(isNavigationBarCompact ? 0.84 : 1)
+            }
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 0.22),
+                value: isNavigationBarCompact
+            )
+        }
+        .padding(.horizontal, DaylightTheme.Spacing.md)
+        .padding(.top, isNavigationBarCompact ? 3 : 6)
+        .padding(.bottom, isNavigationBarCompact ? 3 : 6)
+        .accessibilityValue(isNavigationBarCompact ? "Compact" : "Expanded")
+    }
+
+    // MARK: - Demo Mode Banner
+
+    private var demoModeBanner: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.sm) {
+            HStack(spacing: DaylightTheme.Spacing.sm) {
                 DaylightBadge(
-                    store.isDemoMode ? "Synthetic Australian Demo Mode" : "Personal Workspace (Isolated)",
-                    icon: store.isDemoMode ? "sparkles" : "lock.shield.fill",
-                    tone: store.isDemoMode ? .demo : .positive
+                    "Synthetic Demo Mode",
+                    icon: "sparkles",
+                    tone: .demo
                 )
 
-                Text(
-                    store.isDemoMode
-                        ? "Viewing realistic synthetic AUD records (Sydney). Demo data is never mixed with your personal financial records."
-                        : "Viewing your isolated personal workspace (\(store.profile.timeZoneId))."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+                Text("Viewing realistic synthetic AUD records (Sydney). Demo data is never mixed with your personal financial records.")
+                    .font(DaylightTypography.caption)
+                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
+                    .lineLimit(2)
 
                 Spacer()
 
-                if store.isDemoMode {
-                    Button("Reset Demo") {
-                        store.resetSyntheticDemoData()
-                    }
-                    .font(.caption.weight(.medium))
-                    .buttonStyle(.bordered)
+                Button("Reset Demo") {
+                    store.resetSyntheticDemoData()
                 }
-
-                Button(store.isDemoMode ? "Switch to Personal" : "Switch to Demo") {
-                    store.switchWorkspaceMode(toDemo: !store.isDemoMode)
-                }
-                .font(.caption.weight(.semibold))
-                .buttonStyle(.borderedProminent)
-                .tint(DaylightTheme.accent)
+                .font(DaylightTypography.captionMedium)
+                .buttonStyle(.bordered)
             }
         }
     }
@@ -162,188 +262,183 @@ public struct OverviewDashboardView: View {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(DaylightTheme.positive)
             Text(text)
-                .font(.footnote.weight(.medium))
+                .font(DaylightTypography.callout.weight(.medium))
             Spacer()
             Button("Dismiss") {
                 store.statusBannerMessage = nil
             }
-            .font(.caption.weight(.semibold))
+            .font(DaylightTypography.captionMedium)
         }
-        .padding(12)
+        .padding(DaylightTheme.Spacing.sm)
         .background(
             RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
-                .fill(DaylightTheme.positive.opacity(0.12))
+                .fill(DaylightTheme.positiveSurface(for: colorScheme))
         )
     }
 
     // MARK: - Hero Card: "How much can I comfortably spend today?"
 
     private var heroSafeToSpendCard: some View {
-        DaylightCard(padding: DaylightTheme.Spacing.lg) {
-            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.md) {
-                HStack(alignment: .top) {
+        VStack(spacing: DaylightTheme.Spacing.md) {
+            DaylightBalanceCard(
+                safeToSpendCents: summary.todaysRemainingAllowanceCents,
+                availableBalanceCents: summary.everydayAvailableBankBalanceCents,
+                spentTodayCents: summary.flexibleSpentTodayCents,
+                nextPayDate: store.profile.nextPayDate,
+                daysUntilNextPay: FinancialCalculationEngine.daysUntilNextPayDate(
+                    referenceDate: store.referenceDate,
+                    profile: store.profile
+                ),
+                isOverDailyAllowance: isOverDailyAllowance,
+                ringProgress: ringProgress,
+                timeZoneId: store.profile.timeZoneId,
+                isAmountsHidden: $isAmountsHidden,
+                onInfoTapped: {
+                    store.showingCalculationExplainer = true
+                }
+            )
+
+            // Helpful setup prompt when a personal workspace has not yet configured income or a flexible budget
+            if !store.isDemoMode && summary.periodTakeHomeIncomeCents == 0 && summary.totalFlexibleBudgetForPeriodCents == 0 {
+                HStack(alignment: .center, spacing: DaylightTheme.Spacing.sm) {
+                    Image(systemName: "slider.horizontal.3")
+                        .foregroundStyle(DaylightTheme.Lime.primary)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Set up your pay cycle to calculate your daily Safe-to-Spend")
+                            .font(DaylightTypography.subheadlineMedium)
+                            .foregroundStyle(DaylightTheme.GlassText.primary)
+                        Text("Enter your typical take-home pay or record an income transaction — we never pre-fill synthetic budget amounts in your personal workspace.")
+                            .font(DaylightTypography.caption)
+                            .foregroundStyle(DaylightTheme.GlassText.secondary)
+                    }
+                    Spacer()
+                    Button("Configure Pay Cycle") {
+                        store.showingOnboardingSheet = true
+                    }
+                    .font(DaylightTypography.captionMedium)
+                    .buttonStyle(.borderedProminent)
+                    .tint(DaylightTheme.Lime.primary)
+                }
+                .padding(DaylightTheme.Spacing.sm)
+                .background(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                        .fill(DaylightTheme.Glass.translucent)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                        .stroke(DaylightTheme.Glass.border, lineWidth: 1)
+                )
+            }
+
+            // Empathetic explanation when over or under today's allowance
+            if isOverDailyAllowance {
+                let overBy = abs(summary.todaysRemainingAllowanceCents)
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "heart.text.square.fill")
+                        .foregroundStyle(DaylightTheme.warning)
+                        .font(.title3)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("HOW MUCH CAN I COMFORTABLY SPEND TODAY?")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(DaylightTheme.accent)
-                            .tracking(0.5)
+                        Text("Today's spending is \(AustralianMoneyFormatter.format(cents: overBy)) above your daily target — and that's completely okay.")
+                            .font(DaylightTypography.subheadlineMedium)
+                            .foregroundStyle(DaylightTheme.GlassText.primary)
+                        Text("Daylight automatically spreads this across the remaining \(max(1, summary.remainingDaysInPeriod - 1)) days of your period, or you can adjust your budget target.")
+                            .font(DaylightTypography.caption)
+                            .foregroundStyle(DaylightTheme.GlassText.secondary)
+                    }
+                }
+                .padding(DaylightTheme.Spacing.sm)
+                .background(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                        .fill(DaylightTheme.warningSurface(for: colorScheme))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                        .stroke(DaylightTheme.warning.opacity(0.3), lineWidth: 1)
+                )
+            }
+        }
+    }
 
-                        Text("Safe-to-Spend Today")
-                            .font(.title2.weight(.semibold))
+    // MARK: - Bank Balances (Progressive Disclosure)
 
-                        Text("Period: \(AustralianDateHelper.formatShortDate(summary.periodStart, timeZoneId: store.profile.timeZoneId)) – \(AustralianDateHelper.formatShortDate(summary.periodEnd, timeZoneId: store.profile.timeZoneId)) • \(summary.remainingDaysInPeriod) day\(summary.remainingDaysInPeriod == 1 ? "" : "s") left until next payday")
+    private var accountBalancesCollapsibleSection: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            DisclosureGroup(isExpanded: $showingAccountBalances) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.adaptive(minimum: 180), spacing: 10)
+                        ],
+                        spacing: 10
+                    ) {
+                        balanceStatTile(
+                            title: "Everyday Account",
+                            amountCents: summary.everydayAvailableBankBalanceCents,
+                            caption: "Available in primary bank account",
+                            icon: "building.columns.fill",
+                            tint: DaylightTheme.accent
+                        )
+                        balanceStatTile(
+                            title: "Cash After Unpaid Bills",
+                            amountCents: summary.availableCashAfterCommitmentsCents,
+                            caption: "Everyday balance less \(AustralianMoneyFormatter.format(cents: summary.unpaidFixedCommitmentsRemainingCents)) unpaid commitments",
+                            icon: "checkmark.shield.fill",
+                            tint: DaylightTheme.positive
+                        )
+                        balanceStatTile(
+                            title: "Total Liquid Cash",
+                            amountCents: store.accounts
+                                .filter { $0.connectionStatus != .disconnected && $0.accountType.isAssetAccount }
+                                .reduce(MoneyCents(0)) { $0 + $1.availableBalanceCents },
+                            caption: "Across all linked asset accounts",
+                            icon: "banknote.fill",
+                            tint: .teal
+                        )
+                        balanceStatTile(
+                            title: "Credit & Debt",
+                            amountCents: -summary.totalCreditCardAndDebtBalanceCents,
+                            caption: "Total liability balance",
+                            icon: "creditcard.fill",
+                            tint: .orange
+                        )
+                    }
+
+                    Button {
+                        store.selectedSection = .accounts
+                    } label: {
+                        HStack {
+                            Text("Manage Linked Accounts")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                                .font(.caption2.weight(.bold))
+                        }
+                        .foregroundStyle(DaylightTheme.forestGreen)
+                        .padding(.top, 4)
+                    }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "building.columns")
+                        .foregroundStyle(DaylightTheme.accent)
+                        .font(.title3)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Bank & Liquid Balances")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+
+                        Text("Everyday: \(AustralianMoneyFormatter.format(cents: summary.everydayAvailableBankBalanceCents)) • Cash After Bills: \(AustralianMoneyFormatter.format(cents: summary.availableCashAfterCommitmentsCents))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
-
-                    Button {
-                        store.showingCalculationExplainer = true
-                    } label: {
-                        Label("How this is calculated", systemImage: "info.circle")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
                 }
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: DaylightTheme.Spacing.xl) {
-                        AllowanceRingView(
-                            progress: ringProgress,
-                            isOverAllowance: isOverDailyAllowance,
-                            centerTitle: isOverDailyAllowance ? "Over Today's Target" : "Remaining Today",
-                            centerAmount: AustralianMoneyFormatter.format(cents: summary.todaysRemainingAllowanceCents),
-                            subtitle: isOverDailyAllowance ? "Adjusted tomorrow" : "Safe to spend"
-                        )
-                        heroBreakdownMetrics
-                    }
-
-                    VStack(spacing: DaylightTheme.Spacing.md) {
-                        AllowanceRingView(
-                            progress: ringProgress,
-                            isOverAllowance: isOverDailyAllowance,
-                            centerTitle: isOverDailyAllowance ? "Over Today's Target" : "Remaining Today",
-                            centerAmount: AustralianMoneyFormatter.format(cents: summary.todaysRemainingAllowanceCents),
-                            subtitle: isOverDailyAllowance ? "Adjusted tomorrow" : "Safe to spend"
-                        )
-                        heroBreakdownMetrics
-                    }
-                }
-
-                // Empathetic explanation when over or under today's allowance
-                if isOverDailyAllowance {
-                    let overBy = abs(summary.todaysRemainingAllowanceCents)
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "heart.text.square.fill")
-                            .foregroundStyle(DaylightTheme.warning)
-                            .font(.title3)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Today's spending is \(AustralianMoneyFormatter.format(cents: overBy)) above your daily target — and that's completely okay.")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Daylight automatically spreads this across the remaining \(max(1, summary.remainingDaysInPeriod - 1)) days of your period, or you can adjust your budget target.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
-                            .fill(DaylightTheme.warning.opacity(0.12))
-                    )
-                }
-            }
-        }
-    }
-
-    private var heroBreakdownMetrics: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            metricRow(
-                label: "Today's Opening Allowance",
-                value: AustralianMoneyFormatter.format(cents: summary.todaysStartingAllowanceCents),
-                detail: "Baseline: \(AustralianMoneyFormatter.format(cents: summary.baselineDailyAllowanceCents))/day"
-            )
-            Divider()
-            metricRow(
-                label: "Today's Eligible Flexible Spending",
-                value: AustralianMoneyFormatter.format(cents: summary.flexibleSpentTodayCents),
-                detail: "Excludes fixed bills & internal transfers"
-            )
-            Divider()
-            metricRow(
-                label: "Remaining Flexible Budget (Period)",
-                value: AustralianMoneyFormatter.format(cents: summary.remainingFlexibleBudgetForPeriodCents),
-                detail: "Of \(AustralianMoneyFormatter.format(cents: summary.totalFlexibleBudgetForPeriodCents)) total flexible pool"
-            )
-            Divider()
-            metricRow(
-                label: "Next Payday / Cycle Reset",
-                value: AustralianDateHelper.formatMediumDate(store.profile.nextPayDate, timeZoneId: store.profile.timeZoneId),
-                detail: "Expected \(AustralianMoneyFormatter.format(cents: store.profile.typicalTakeHomePayCents)) (\(store.profile.payFrequency.displayName))"
-            )
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func metricRow(label: String, value: String, detail: String) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.subheadline.weight(.medium))
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text(value)
-                .font(.subheadline.weight(.bold))
-                .monospacedDigit()
-        }
-    }
-
-    // MARK: - Bank Balances vs Budgeting Figures (Explicit Distinction)
-
-    private var balancesVsBudgetComparisonGrid: some View {
-        VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
-            DaylightSectionHeader(
-                title: "Account Balances vs Budget Allowance",
-                subtitle: "Budget allowances are planning targets — never confused with your bank's available cash balance."
-            )
-
-            LazyVGrid(
-                columns: [
-                    GridItem(.adaptive(minimum: 220), spacing: DaylightTheme.Spacing.sm)
-                ],
-                spacing: DaylightTheme.Spacing.sm
-            ) {
-                balanceStatTile(
-                    title: "Everyday Bank Available",
-                    amountCents: summary.everydayAvailableBankBalanceCents,
-                    caption: "Actual funds in Everyday Account",
-                    icon: "building.columns.fill",
-                    tint: DaylightTheme.accent
-                )
-                balanceStatTile(
-                    title: "Cash After Unpaid Bills",
-                    amountCents: summary.availableCashAfterCommitmentsCents,
-                    caption: "Everyday balance minus \(AustralianMoneyFormatter.format(cents: summary.unpaidFixedCommitmentsRemainingCents)) unpaid bills",
-                    icon: "checkmark.shield.fill",
-                    tint: DaylightTheme.positive
-                )
-                balanceStatTile(
-                    title: "Total Liquid Savings & Cash",
-                    amountCents: summary.totalLiquidCashAcrossAccountsCents + (store.accounts.filter { $0.accountType == .highInterestSavings }.reduce(0) { $0 + $1.availableBalanceCents }),
-                    caption: "Across all linked asset accounts",
-                    icon: "banknote.fill",
-                    tint: .teal
-                )
-                balanceStatTile(
-                    title: "Credit Card & Loan Balances",
-                    amountCents: -summary.totalCreditCardAndDebtBalanceCents,
-                    caption: "Current posted liability balances",
-                    icon: "creditcard.fill",
-                    tint: .orange
-                )
             }
         }
     }
@@ -355,22 +450,21 @@ public struct OverviewDashboardView: View {
         icon: String,
         tint: Color
     ) -> some View {
-        DaylightCard(padding: 14) {
+        DaylightCard(padding: DaylightTheme.Spacing.sm) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: icon)
                         .foregroundStyle(tint)
                     Text(title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(DaylightTypography.captionMedium)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                     Spacer()
                 }
                 Text(AustralianMoneyFormatter.format(cents: amountCents))
-                    .font(.title3.weight(.bold))
-                    .monospacedDigit()
+                    .font(DaylightTypography.financialAmount(size: 20, weight: .bold))
                 Text(caption)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(DaylightTypography.finePrint)
+                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                     .lineLimit(2)
             }
         }
@@ -379,69 +473,26 @@ public struct OverviewDashboardView: View {
     // MARK: - Unclassified / Uncertain Transactions Review Banner
 
     private var unclassifiedReviewBanner: some View {
-        DaylightCard(padding: 14) {
-            HStack(spacing: 12) {
+        DaylightCard(padding: DaylightTheme.Spacing.sm) {
+            HStack(spacing: DaylightTheme.Spacing.sm) {
                 Image(systemName: "questionmark.folder.fill")
                     .font(.title3)
                     .foregroundStyle(DaylightTheme.warning)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(store.unclassifiedTransactions.count) Transaction\(store.unclassifiedTransactions.count == 1 ? "" : "s") Need Classification Review")
-                        .font(.subheadline.weight(.semibold))
+                        .font(DaylightTypography.subheadlineMedium)
                     Text("Ambiguous merchant descriptions are never guessed automatically. Review and assign a category or merchant rule.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(DaylightTypography.caption)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                 }
                 Spacer()
                 Button("Review Now") {
                     store.transactionCategoryDrilldown = .cashAndUnclassified
                     store.selectedSection = .transactions
                 }
-                .font(.caption.weight(.semibold))
+                .font(DaylightTypography.captionMedium)
                 .buttonStyle(.borderedProminent)
                 .tint(DaylightTheme.accent)
-            }
-        }
-    }
-
-    // MARK: - Quick Actions Row
-
-    private var quickActionsRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                Button {
-                    store.selectedSection = .transactions
-                } label: {
-                    Label("View Today's Transactions", systemImage: "list.bullet.rectangle")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    store.showingStatementImporter = true
-                } label: {
-                    Label("Import Bank CSV Statement", systemImage: "tray.and.arrow.down.fill")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    store.selectedSection = .budgets
-                } label: {
-                    Label("Adjust Budget & Pay Cycle", systemImage: "slider.horizontal.3")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    store.selectedSection = .bills
-                } label: {
-                    Label("Review Upcoming Bills", systemImage: "calendar.badge.clock")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    store.showingCalculationExplainer = true
-                } label: {
-                    Label("Understand Spending Calculation", systemImage: "function")
-                }
-                .buttonStyle(.bordered)
             }
         }
     }
@@ -451,25 +502,8 @@ public struct OverviewDashboardView: View {
     @ViewBuilder
     private var featuredInsightCard: some View {
         if let topInsight = store.activeInsights.first {
-            DaylightCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        DaylightBadge("Evidence-Backed Insight", icon: "lightbulb.fill", tone: topInsight.severity == .headsUp ? .warning : .positive)
-                        Spacer()
-                        Button("All Insights") {
-                            store.selectedSection = .insights
-                        }
-                        .font(.caption.weight(.semibold))
-                    }
-                    Text(topInsight.title)
-                        .font(.headline)
-                    Text(topInsight.summary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text(topInsight.actionableRecommendation)
-                        .font(.caption)
-                        .foregroundStyle(DaylightTheme.accent)
-                }
+            DaylightInsightCard(insight: topInsight) {
+                store.selectedSection = .insights
             }
         }
     }
@@ -622,7 +656,7 @@ public struct OverviewDashboardView: View {
                                 Label(prog.category.displayName, systemImage: prog.category.symbolName)
                                     .font(.subheadline.weight(.medium))
                                 Spacer()
-                                Text("\(AustralianMoneyFormatter.format(cents: prog.netSpentCents)) / \(AustralianMoneyFormatter.format(cents: prog.budgetedCents))")
+                                Text("\(AustralianMoneyFormatter.format(cents: prog.netSpentCents)) / \(AustralianMoneyFormatter.format(cents: prog.budgetedCents)) • \(prog.sourcePeriodType.displayName)")
                                     .font(.caption.weight(.semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(prog.isOverBudget ? DaylightTheme.cautionRed : .primary)
@@ -644,7 +678,6 @@ public struct OverviewDashboardView: View {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
                 DaylightSectionHeader(
                     title: "Recent Transactions",
-                    subtitle: "Tap any transaction to edit category, split, or inspect source",
                     trailingTitle: "View All Transactions"
                 ) {
                     store.selectedSection = .transactions
@@ -660,81 +693,15 @@ public struct OverviewDashboardView: View {
                         showingQuickAddTransaction = true
                     }
                 } else {
-                    ForEach(store.transactions.prefix(6)) { tx in
-                        Button {
+                    ForEach(store.transactions.prefix(3)) { tx in
+                        DaylightTransactionRow(
+                            transaction: tx,
+                            timeZoneId: store.profile.timeZoneId,
+                            isAmountsHidden: isAmountsHidden
+                        ) {
                             selectedTransactionForDetail = tx
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: tx.category.symbolName)
-                                    .foregroundStyle(tx.category.tintColor)
-                                    .frame(width: 34, height: 34)
-                                    .background(Circle().fill(tx.category.tintColor.opacity(0.14)))
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(tx.merchantName)
-                                            .font(.subheadline.weight(.medium))
-                                            .foregroundStyle(.primary)
-                                        if tx.status == .pending {
-                                            Text("Pending")
-                                                .font(.caption2.weight(.semibold))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 1)
-                                                .background(Capsule().fill(Color.orange.opacity(0.18)))
-                                                .foregroundStyle(.orange)
-                                        }
-                                        if tx.classificationConfidence < 0.70 {
-                                            Text("Review")
-                                                .font(.caption2.weight(.semibold))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 1)
-                                                .background(Capsule().fill(DaylightTheme.warning.opacity(0.2)))
-                                                .foregroundStyle(DaylightTheme.warning)
-                                        }
-                                    }
-                                    Text("\(tx.category.displayName) • \(AustralianDateHelper.formatShortDate(tx.occurredAt, timeZoneId: store.profile.timeZoneId))")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Spacer()
-
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text(
-                                        AustralianMoneyFormatter.format(
-                                            cents: tx.direction == .debit ? -tx.amountCents : tx.amountCents,
-                                            showPlusForPositive: true
-                                        )
-                                    )
-                                    .font(.subheadline.weight(.semibold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(tx.direction == .credit ? DaylightTheme.positive : .primary)
-
-                                    Text(transactionKindBadgeLabel(for: tx))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
                     }
-
-                    Button {
-                        store.selectedSection = .transactions
-                    } label: {
-                        HStack {
-                            Text("View All Transactions (\(store.transactions.count))")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Image(systemName: "arrow.right")
-                                .font(.caption.weight(.bold))
-                        }
-                        .foregroundStyle(DaylightTheme.forestGreen)
-                        .padding(.top, 6)
-                    }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -760,7 +727,6 @@ public struct OverviewDashboardView: View {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
                 DaylightSectionHeader(
                     title: "Savings Goals Progress",
-                    subtitle: "Planned savings: \(AustralianMoneyFormatter.format(cents: summary.plannedSavingsForPeriodCents))/period",
                     trailingTitle: "Manage Goals"
                 ) {
                     store.selectedSection = .savings
@@ -795,10 +761,62 @@ public struct OverviewDashboardView: View {
     }
 
     private var regulatoryFooter: some View {
-        Text(BrandConfig.regulatoryDisclaimer)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .padding(.top, 8)
+        HStack {
+            Spacer()
+            Button {
+                showingRegulatoryDisclaimer = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34, alignment: .center)
+                    .background(
+                        Circle()
+                            .fill(DaylightTheme.surface(for: colorScheme))
+                    )
+                    .overlay(
+                        Circle()
+                            .strokeBorder(DaylightTheme.border(for: colorScheme), lineWidth: 1)
+                    )
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Regulatory disclaimer")
+            .sheet(isPresented: $showingRegulatoryDisclaimer) {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "info.circle.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(DaylightTheme.accent)
+                                Text("Important Information")
+                                    .font(.headline)
+                            }
+
+                            Text(BrandConfig.regulatoryDisclaimer)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(3)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(20)
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showingRegulatoryDisclaimer = false
+                            }
+                        }
+                    }
+                }
+                .presentationDetents([.height(260), .medium])
+                .presentationDragIndicator(.visible)
+            }
+            Spacer()
+        }
+        .padding(.top, 4)
     }
 }
 
@@ -851,6 +869,363 @@ public struct CalculationExplainerSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+}
+// MARK: - Dashboard Profile Management Sheet
+
+public struct DashboardProfileSheet: View {
+    @Bindable var store: DaylightStore
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var preferredNameDraft: String = ""
+    @State private var avatarImageDataDraft: Data? = nil
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var selectedPresetId: String? = nil
+    @State private var isProcessingPhoto: Bool = false
+    @State private var statusFeedback: String? = nil
+    @State private var errorMessage: String? = nil
+
+    public init(store: DaylightStore) {
+        self.store = store
+        _preferredNameDraft = State(initialValue: store.profile.preferredName)
+        _avatarImageDataDraft = State(initialValue: store.profile.avatarImageData)
+    }
+
+    private var effectiveName: String {
+        let trimmed = preferredNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? store.greetingName : trimmed
+    }
+
+    public var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: DaylightTheme.Spacing.lg) {
+                    // 1. Avatar Preview Header
+                    avatarPreviewHeader
+
+                    // 2. Greeting Name Editor
+                    nameEditorCard
+
+                    // 3. Photo & Preset Avatar Options (Personal Workspace only)
+                    if !store.isDemoMode {
+                        photoPickerCard
+                        presetAvatarsCard
+
+                        if avatarImageDataDraft != nil {
+                            removePhotoButton
+                        }
+                    } else {
+                        demoWorkspaceCard
+                    }
+
+                    // 4. Quick Settings Link
+                    fullSettingsCard
+
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(DaylightTheme.cautionRed)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(DaylightTheme.Spacing.md)
+            }
+            .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+            .navigationTitle("Profile & Greeting")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saveProfile()
+                    }
+                    .font(.body.weight(.semibold))
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    // MARK: - Avatar Preview Header
+
+    private var avatarPreviewHeader: some View {
+        VStack(spacing: DaylightTheme.Spacing.sm) {
+            DaylightAvatarView(
+                avatarImageData: avatarImageDataDraft,
+                name: effectiveName,
+                size: 96,
+                isDemo: store.isDemoMode,
+                showBorder: true,
+                borderColor: DaylightTheme.accent
+            )
+
+            Text("G'day, \(effectiveName)")
+                .font(.system(.title3, design: .rounded, weight: .bold))
+                .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+
+            if let statusFeedback {
+                Text(statusFeedback)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(DaylightTheme.positive)
+                    .transition(.opacity)
+            } else {
+                Text(store.isDemoMode ? "Synthetic Australian Demo Avatar" : "Visible across your dashboard and daily summaries")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Name Editor Card
+
+    private var nameEditorCard: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Greeting Name", systemImage: "person.text.rectangle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+
+                TextField("Your preferred name (e.g. Ketan)", text: $preferredNameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+
+                HStack {
+                    Text("Dashboard preview:")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("G'day, \(effectiveName)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(DaylightTheme.accent)
+                }
+            }
+        }
+    }
+
+    // MARK: - Photo Picker Card
+
+    private var photoPickerCard: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Custom Photo", systemImage: "photo.on.rectangle.angled")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+
+                PhotosPicker(
+                    selection: $selectedPhotoItem,
+                    matching: .images,
+                    photoLibrary: .shared()
+                ) {
+                    HStack {
+                        Image(systemName: "camera.fill")
+                        Text(avatarImageDataDraft == nil ? "Choose Photo from Library" : "Change Photo")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        if isProcessingPhoto {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                            .fill(DaylightTheme.accent)
+                    )
+                    .foregroundStyle(.white)
+                }
+                .onChange(of: selectedPhotoItem) { _, newItem in
+                    guard let newItem else { return }
+                    isProcessingPhoto = true
+                    Task {
+                        if let data = try? await newItem.loadTransferable(type: Data.self),
+                           let optimized = ProfileImageProcessor.process(data: data) {
+                            await MainActor.run {
+                                withAnimation(.spring(duration: 0.25)) {
+                                    self.avatarImageDataDraft = optimized
+                                    self.selectedPresetId = nil
+                                    self.statusFeedback = "Photo selected from library."
+                                    self.isProcessingPhoto = false
+                                }
+                            }
+                        } else {
+                            await MainActor.run {
+                                self.isProcessingPhoto = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Preset Avatars Card
+
+    private var presetAvatarsCard: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Or Choose an Australian Preset", systemImage: "sparkles")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    ForEach(PresetAvatar.australianPresets) { preset in
+                        Button {
+                            selectPreset(preset)
+                        } label: {
+                            VStack(spacing: 6) {
+                                ZStack {
+                                    Circle()
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [preset.startColor, preset.endColor],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                        )
+                                        .frame(width: 52, height: 52)
+
+                                    Image(systemName: preset.systemName)
+                                        .font(.system(size: 22, weight: .bold))
+                                        .foregroundStyle(.white)
+
+                                    if selectedPresetId == preset.id {
+                                        Circle()
+                                            .strokeBorder(DaylightTheme.accent, lineWidth: 2.5)
+                                            .frame(width: 52, height: 52)
+
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 16))
+                                            .foregroundStyle(.white, DaylightTheme.positive)
+                                            .offset(x: 18, y: -18)
+                                    }
+                                }
+
+                                Text(preset.title)
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                                    .fill(selectedPresetId == preset.id ? DaylightTheme.accent.opacity(0.10) : Color.clear)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Remove Photo Button
+
+    private var removePhotoButton: some View {
+        Button(role: .destructive) {
+            withAnimation(.spring(duration: 0.25)) {
+                avatarImageDataDraft = nil
+                selectedPresetId = nil
+                statusFeedback = "Reverted to initials avatar."
+            }
+        } label: {
+            Label("Remove Photo & Use Initials", systemImage: "arrow.counterclockwise")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(DaylightTheme.cautionRed)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.bordered)
+        .tint(DaylightTheme.cautionRed)
+    }
+
+    // MARK: - Demo Workspace Card
+
+    private var demoWorkspaceCard: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 8) {
+                DaylightBadge("Synthetic Demo Mode", icon: "sparkles", tone: .demo)
+                Text("You are currently exploring in Synthetic Demo Mode. Profile photos and personal preferences are preserved in your personal workspace when you switch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Full Settings Link
+
+    private var fullSettingsCard: some View {
+        DaylightCard(padding: DaylightTheme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Looking for more preferences?")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(DaylightTheme.primaryText(for: colorScheme))
+                        Text("Pay cycle, savings targets, notifications, and export options.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Open Settings") {
+                        store.selectedSection = .settings
+                        dismiss()
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                    .tint(DaylightTheme.accent)
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func selectPreset(_ preset: PresetAvatar) {
+        selectedPresetId = preset.id
+        if let data = ProfileImageProcessor.renderPresetAvatar(preset) {
+            withAnimation(.spring(duration: 0.25)) {
+                self.avatarImageDataDraft = data
+                self.statusFeedback = "Selected \(preset.title)."
+            }
+        }
+    }
+
+    private func saveProfile() {
+        do {
+            // 1. Update avatar
+            try store.updateProfileAvatar(imageData: avatarImageDataDraft)
+
+            // 2. Update preferred name
+            var p = store.profile
+            let cleanName = preferredNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanName.isEmpty {
+                p.preferredName = cleanName
+            }
+            p.tenantId = store.activeTenantId
+            try store.updateProfile(p)
+
+            #if canImport(UIKit)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 }

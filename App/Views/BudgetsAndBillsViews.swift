@@ -21,6 +21,7 @@ public struct BudgetsView: View {
     @State private var editingCommitmentId: UUID? = nil
 
     @State private var newBudgetCategory: AustralianCategory = .groceries
+    @State private var newBudgetPeriodType: PayFrequency = .fortnightly
     @State private var newBudgetDollars: String = "350.00"
     @State private var newBudgetRollover: Bool = false
     @State private var budgetSheetError: String? = nil
@@ -52,6 +53,10 @@ public struct BudgetsView: View {
             : store.profile.payFrequency.displayName
     }
 
+    private var activeTargetFrequency: PayFrequency {
+        FinancialCalculationEngine.activeCalculationTargetFrequency(for: store.profile)
+    }
+
     private var effectiveFixedCategorySet: Set<AustralianCategory> {
         FinancialCalculationEngine.effectiveFixedCommitmentCategories(fixedCommitments: store.fixedCommitments)
     }
@@ -59,7 +64,7 @@ public struct BudgetsView: View {
     private var totalAllocatedFlexibleEnvelopesCents: MoneyCents {
         store.categoryBudgetProgress
             .filter { !effectiveFixedCategorySet.contains($0.category) }
-            .reduce(MoneyCents(0)) { $0 + $1.budgetedCents }
+            .reduce(MoneyCents(0)) { $0 + $1.normalizedActivePeriodLimitCents }
     }
 
     public var body: some View {
@@ -75,7 +80,8 @@ public struct BudgetsView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Budgets")
         .onAppear {
             syncCustomCapFieldFromProfile()
@@ -99,12 +105,6 @@ public struct BudgetsView: View {
                     store.showingCalculationExplainer = true
                 } label: {
                     Label("Formula", systemImage: "function")
-                }
-
-                Button {
-                    openAddCategoryBudgetSheet()
-                } label: {
-                    Label("Add Category Limit", systemImage: "plus.circle.fill")
                 }
             }
 
@@ -133,17 +133,51 @@ public struct BudgetsView: View {
         }
     }
 
-    private func openAddCategoryBudgetSheet() {
-        isEditingExistingCategoryBudget = false
-        budgetSheetError = nil
-        newBudgetCategory = .groceries
-        if let existing = store.categoryBudgetProgress.first(where: { $0.category == .groceries }) {
-            newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: existing.baseLimitCents)
-            newBudgetRollover = store.categoryBudgets.first(where: { $0.category == .groceries })?.rolloverEnabled ?? false
+    private var defaultCategoryPeriodType: PayFrequency {
+        if store.profile.preferredBudgetingMethod == .monthlyFlexible {
+            return .monthly
+        }
+        switch store.profile.payFrequency {
+        case .weekly: return .weekly
+        case .fortnightly: return .fortnightly
+        case .monthly: return .monthly
+        case .irregular: return .fortnightly
+        }
+    }
+
+    private func categoryPeriodUnitLabel(_ period: PayFrequency) -> String {
+        switch period {
+        case .weekly: return "Week"
+        case .fortnightly: return "Fortnight"
+        case .monthly: return "Month"
+        case .irregular: return "28 Days"
+        }
+    }
+
+    private func populateCategoryBudgetDraft(for category: AustralianCategory) {
+        newBudgetCategory = category
+        if let existing = store.categoryBudgets.first(where: { $0.category == category }) {
+            switch existing.periodType {
+            case .weekly, .fortnightly, .monthly:
+                newBudgetPeriodType = existing.periodType
+                newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: existing.limitCents)
+            case .irregular:
+                newBudgetPeriodType = defaultCategoryPeriodType
+                let progLimit = store.categoryBudgetProgress.first(where: { $0.category == category })?.baseLimitCents ?? existing.limitCents
+                newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: progLimit)
+            }
+            newBudgetRollover = existing.rolloverEnabled
         } else {
+            newBudgetPeriodType = defaultCategoryPeriodType
             newBudgetDollars = "350.00"
             newBudgetRollover = store.profile.enableBudgetRollover
         }
+    }
+
+    private func openAddCategoryBudgetSheet() {
+        isEditingExistingCategoryBudget = false
+        budgetSheetError = nil
+        populateCategoryBudgetDraft(for: .groceries)
         showingAddCategoryBudget = true
     }
 
@@ -254,15 +288,22 @@ public struct BudgetsView: View {
             return summary.totalFlexibleSpentInPeriodCents > 0 ? 1.0 : 0.0
         }()
 
-        return DaylightCard {
-            VStack(alignment: .leading, spacing: 12) {
+        return DaylightGlassCard(
+            padding: DaylightTheme.Spacing.md,
+            cornerRadius: DaylightTheme.Radius.lg,
+            isElevated: true
+        ) {
+            VStack(alignment: .leading, spacing: DaylightTheme.Spacing.md) {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Active Period Summary (\(summary.totalDaysInPeriod) Days)")
-                            .font(.headline)
+                            .font(.title3.weight(.bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
                         Text("\(AustralianDateHelper.formatMediumDate(summary.periodStart, timeZoneId: store.profile.timeZoneId)) – \(AustralianDateHelper.formatMediumDate(summary.periodEnd, timeZoneId: store.profile.timeZoneId)) • \(summary.remainingDaysInPeriod) day\(summary.remainingDaysInPeriod == 1 ? "" : "s") left")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Spacer()
@@ -273,7 +314,7 @@ public struct BudgetsView: View {
                         Image(systemName: "info.circle")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(DaylightTheme.accent)
-                            .frame(width: 34, height: 34, alignment: .center)
+                            .frame(width: 40, height: 40, alignment: .center)
                             .background(
                                 Circle()
                                     .fill(DaylightTheme.sageSurface(for: colorScheme))
@@ -291,78 +332,145 @@ public struct BudgetsView: View {
                     .accessibilityLabel("View active period budget formula")
                 }
 
-                ProgressView(value: ratio)
-                    .tint(summary.remainingFlexibleBudgetForPeriodCents < 0 ? DaylightTheme.cautionRed : DaylightTheme.positive)
+                GeometryReader { geometry in
+                    Capsule(style: .continuous)
+                        .fill(DaylightTheme.dividerColor)
+                        .overlay(alignment: .leading) {
+                            Capsule(style: .continuous)
+                                .fill(summary.remainingFlexibleBudgetForPeriodCents < 0 ? DaylightTheme.cautionRed : DaylightTheme.positive)
+                                .frame(width: geometry.size.width * ratio)
+                        }
+                }
+                .frame(height: 6)
+                .clipShape(Capsule(style: .continuous))
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
-                    statBlock("Flexible Budgeted", cents: summary.totalFlexibleBudgetForPeriodCents)
-                    statBlock("Flexible Spent", cents: summary.totalFlexibleSpentInPeriodCents)
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: DaylightTheme.Spacing.sm, alignment: .top),
+                        GridItem(.flexible(), spacing: DaylightTheme.Spacing.sm, alignment: .top)
+                    ],
+                    spacing: DaylightTheme.Spacing.sm
+                ) {
+                    statBlock(
+                        "Flexible Budgeted",
+                        cents: summary.totalFlexibleBudgetForPeriodCents,
+                        tone: .budget
+                    )
+                    statBlock(
+                        "Flexible Spent",
+                        cents: summary.totalFlexibleSpentInPeriodCents,
+                        tone: .budget
+                    )
                     statBlock(
                         "Flexible Remaining",
                         cents: summary.remainingFlexibleBudgetForPeriodCents,
-                        highlightNegative: true
+                        highlightNegative: true,
+                        tone: .budget
                     )
-                    statBlock("Expected End-of-Period Spend", cents: summary.forecastEndOfPeriodFlexibleSpendCents)
+                    statBlock(
+                        "Estimated Period Spend",
+                        cents: summary.forecastEndOfPeriodFlexibleSpendCents,
+                        tone: .budget
+                    )
                 }
 
                 Divider()
+                    .opacity(0.35)
 
-                // Cash-flow & envelope reconciliation line so every dollar on the Budgets page adds up visibly
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(
-                        "Period derivation: Income \(AustralianMoneyFormatter.format(cents: summary.periodTakeHomeIncomeCents)) − Fixed Bills \(AustralianMoneyFormatter.format(cents: summary.totalFixedCommitmentsForPeriodCents)) − Savings \(AustralianMoneyFormatter.format(cents: summary.plannedSavingsForPeriodCents)) • Safe-to-Spend today: \(AustralianMoneyFormatter.format(cents: summary.todaysRemainingAllowanceCents))"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                // Progressive disclosure: Cash-flow & envelope reconciliation available on demand
+                DisclosureGroup("View cash-flow derivation") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            "Income \(AustralianMoneyFormatter.format(cents: summary.periodTakeHomeIncomeCents)) − Fixed Bills \(AustralianMoneyFormatter.format(cents: summary.totalFixedCommitmentsForPeriodCents)) − Savings \(AustralianMoneyFormatter.format(cents: summary.plannedSavingsForPeriodCents)) • Safe-to-Spend today: \(AustralianMoneyFormatter.format(cents: summary.todaysRemainingAllowanceCents))"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
 
-                    if totalAllocatedFlexibleEnvelopesCents > 0 && summary.totalFlexibleBudgetForPeriodCents > 0 {
-                        let unallocatedDiff = summary.totalFlexibleBudgetForPeriodCents - totalAllocatedFlexibleEnvelopesCents
-                        if unallocatedDiff >= 0 {
-                            Text(
-                                "Envelope check: \(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents)) allocated across flexible categories • \(AustralianMoneyFormatter.format(cents: unallocatedDiff)) unallocated flexible buffer."
-                            )
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        } else {
-                            Text(
-                                "Envelope notice: Flexible category limits (\(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents))) exceed your period flexible budget by \(AustralianMoneyFormatter.format(cents: abs(unallocatedDiff)))."
-                            )
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(DaylightTheme.warning)
-                            .monospacedDigit()
+                        if totalAllocatedFlexibleEnvelopesCents > 0 && summary.totalFlexibleBudgetForPeriodCents > 0 {
+                            let unallocatedDiff = summary.totalFlexibleBudgetForPeriodCents - totalAllocatedFlexibleEnvelopesCents
+                            if unallocatedDiff >= 0 {
+                                Text(
+                                    "Envelope allocation: \(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents)) allocated across categories • \(AustralianMoneyFormatter.format(cents: unallocatedDiff)) unallocated buffer."
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                            } else {
+                                Text(
+                                    "Envelope notice: Category limits (\(AustralianMoneyFormatter.format(cents: totalAllocatedFlexibleEnvelopesCents))) exceed your period budget by \(AustralianMoneyFormatter.format(cents: abs(unallocatedDiff)))."
+                                )
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(DaylightTheme.warning)
+                                .monospacedDigit()
+                            }
                         }
                     }
+                    .padding(.top, 4)
                 }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
             }
         }
     }
 
-    private func statBlock(_ label: String, cents: MoneyCents, highlightNegative: Bool = false) -> some View {
+    private enum StatTone {
+        case budget
+        case spent
+        case remaining
+        case negative
+        case forecast
+
+        var color: Color {
+            switch self {
+            case .budget: return Color(red: 88 / 255, green: 174 / 255, blue: 166 / 255)
+            case .spent: return Color(red: 224 / 255, green: 166 / 255, blue: 76 / 255)
+            case .remaining: return DaylightTheme.positive
+            case .negative: return DaylightTheme.cautionRed
+            case .forecast: return Color(red: 157 / 255, green: 133 / 255, blue: 207 / 255)
+            }
+        }
+    }
+
+    private func statBlock(
+        _ label: String,
+        cents: MoneyCents,
+        highlightNegative: Bool = false,
+        tone: StatTone
+    ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(DaylightTypography.caption)
+                .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
             Text(AustralianMoneyFormatter.format(cents: cents))
-                .font(.headline.weight(.bold))
-                .monospacedDigit()
-                .foregroundStyle(highlightNegative && cents < 0 ? DaylightTheme.cautionRed : .primary)
+                .font(DaylightTypography.financialAmount(size: 17, weight: .bold))
+                .foregroundStyle(highlightNegative && cents < 0 ? DaylightTheme.negative : DaylightTheme.primaryText(for: colorScheme))
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(DaylightTheme.Spacing.sm)
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
-                .fill(Color.secondary.opacity(0.08))
+                .fill(
+                    colorScheme == .dark
+                        ? tone.color.opacity(0.13)
+                        : tone.color.opacity(0.08)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
+                .strokeBorder(
+                    tone.color.opacity(colorScheme == .dark ? 0.26 : 0.20),
+                    lineWidth: 1
+                )
         )
     }
 
     private var categoryBudgetsSection: some View {
         VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
             DaylightSectionHeader(
-                title: "Category Limits & Envelopes",
+                title: "Category Limits",
                 subtitle: "Normalized to your active \(summary.totalDaysInPeriod)-day period • Tap a category's transactions to inspect",
-                trailingTitle: "+ Add Category Limit"
+                trailingTitle: "+ Add Category"
             ) {
                 openAddCategoryBudgetSheet()
             }
@@ -371,8 +479,8 @@ public struct BudgetsView: View {
                 DaylightEmptyState(
                     icon: "chart.pie",
                     title: "You haven't set a category budget yet",
-                    message: "Create category limits for Groceries, Cafes, or Transport to track pacing alongside your daily safe-to-spend allowance.",
-                    actionTitle: "Set Up First Category Limit"
+                    message: "Set flexible category limits and stay on track daily.",
+                    actionTitle: "Set Up First Category"
                 ) {
                     openAddCategoryBudgetSheet()
                 }
@@ -384,7 +492,7 @@ public struct BudgetsView: View {
                                 Image(systemName: prog.category.symbolName)
                                     .foregroundStyle(prog.category.tintColor)
                                 Text(prog.category.displayName)
-                                    .font(.headline)
+                                    .font(DaylightTypography.cardTitle)
                                 Spacer()
                                 let pct = Int(round(prog.percentageUsed * 100))
                                 DaylightBadge(
@@ -395,50 +503,38 @@ public struct BudgetsView: View {
                             }
 
                             ProgressView(value: min(1.0, max(0.0, prog.percentageUsed)))
-                                .tint(prog.isOverBudget ? DaylightTheme.cautionRed : (prog.percentageUsed > 0.8 ? DaylightTheme.warning : DaylightTheme.positive))
+                                .tint(prog.isOverBudget ? DaylightTheme.negative : (prog.percentageUsed > 0.8 ? DaylightTheme.warning : DaylightTheme.positive))
 
                             HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Spent: \(AustralianMoneyFormatter.format(cents: prog.netSpentCents)) of \(AustralianMoneyFormatter.format(cents: prog.budgetedCents))")
-                                        .font(.subheadline.weight(.medium))
+                                    Text("Spent: \(AustralianMoneyFormatter.format(cents: prog.netSpentCents)) of \(AustralianMoneyFormatter.format(cents: prog.budgetedCents)) / \(categoryPeriodUnitLabel(prog.sourcePeriodType))")
+                                        .font(DaylightTypography.subheadlineMedium)
                                         .monospacedDigit()
 
-                                    if prog.rolloverAppliedCents != 0 || prog.sourceLimitCents != prog.baseLimitCents {
-                                        let basePart = "Base limit \(AustralianMoneyFormatter.format(cents: prog.baseLimitCents))"
-                                        let rolloverPart = prog.rolloverAppliedCents != 0
-                                            ? " (\(AustralianMoneyFormatter.format(cents: prog.rolloverAppliedCents, showPlusForPositive: true)) rollover)"
-                                            : ""
-                                        let scaledPart = prog.sourceLimitCents != prog.baseLimitCents
-                                            ? " • Scaled from \(AustralianMoneyFormatter.format(cents: prog.sourceLimitCents)) \(prog.sourcePeriodType.displayName)"
-                                            : ""
-                                        Text("\(basePart)\(rolloverPart)\(scaledPart)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .monospacedDigit()
-                                    }
+                                    let rolloverPart = prog.rolloverAppliedCents != 0
+                                        ? " (\(AustralianMoneyFormatter.format(cents: prog.rolloverAppliedCents, showPlusForPositive: true)) rollover)"
+                                        : ""
+                                    Text("Cadence: \(AustralianMoneyFormatter.format(cents: prog.baseLimitCents)) \(prog.sourcePeriodType.displayName)\(rolloverPart)")
+                                        .font(DaylightTypography.caption)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
+                                        .monospacedDigit()
 
                                     Text("Expected end-of-period: \(AustralianMoneyFormatter.format(cents: prog.projectedEndOfPeriodCents))")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(DaylightTypography.caption)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                         .monospacedDigit()
                                 }
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 4) {
                                     Text(prog.remainingCents >= 0 ? "\(AustralianMoneyFormatter.format(cents: prog.remainingCents)) left" : "\(AustralianMoneyFormatter.format(cents: abs(prog.remainingCents))) over")
-                                        .font(.subheadline.weight(.bold))
-                                        .monospacedDigit()
-                                        .foregroundStyle(prog.remainingCents >= 0 ? DaylightTheme.positive : DaylightTheme.cautionRed)
+                                        .font(DaylightTypography.financialAmount(size: 15, weight: .bold))
+                                        .foregroundStyle(prog.remainingCents >= 0 ? DaylightTheme.positive : DaylightTheme.negative)
 
                                     HStack(spacing: 8) {
                                         Button("Edit Limit") {
                                             isEditingExistingCategoryBudget = true
                                             budgetSheetError = nil
-                                            newBudgetCategory = prog.category
-                                            // Always edit the clean active-period base limit so rollover is never compounded on save
-                                            newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: prog.baseLimitCents)
-                                            if let existing = store.categoryBudgets.first(where: { $0.category == prog.category }) {
-                                                newBudgetRollover = existing.rolloverEnabled
-                                            }
+                                            populateCategoryBudgetDraft(for: prog.category)
                                             showingAddCategoryBudget = true
                                         }
                                         .font(.caption.weight(.semibold))
@@ -475,49 +571,46 @@ public struct BudgetsView: View {
     }
 
     private var fixedCommitmentsSection: some View {
-        let isMonthlyCalendarMode = (store.profile.preferredBudgetingMethod == .monthlyFlexible)
-        return DaylightCard {
+        DaylightCard {
             VStack(alignment: .leading, spacing: DaylightTheme.Spacing.sm) {
                 DaylightSectionHeader(
                     title: "Reserved Fixed Commitments",
-                    subtitle: "Subtracted before calculating flexible spending (never double-counted when paid)",
+                    subtitle: "Accounted for before spendable balance",
                     trailingTitle: "+ Add Fixed Bill"
                 ) {
                     openAddFixedCommitmentSheet()
                 }
 
                 if store.fixedCommitments.isEmpty {
-                    Text("No fixed commitments configured yet. Add recurring rent, mortgage, strata, utilities, or loan instalments here so they are reserved before calculating your daily spending allowance.")
+                    Text("No fixed commitments yet")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
                 } else {
                     ForEach(store.fixedCommitments) { item in
-                        let normalizedForPeriodCents = FinancialCalculationEngine.normalizedAmountForPeriod(
+                        let normalizedForPeriodCents = FinancialCalculationEngine.normalizedAmountForCalculation(
                             amountCents: item.amountCents,
-                            sourceFrequency: item.frequency,
-                            isMonthlyCalendarMode: isMonthlyCalendarMode,
-                            periodDays: summary.totalDaysInPeriod
+                            from: item.frequency,
+                            to: activeTargetFrequency
                         )
                         HStack {
                             Image(systemName: item.category.symbolName)
                                 .foregroundStyle(item.category.tintColor)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)
-                                    .font(.subheadline.weight(.medium))
+                                    .font(DaylightTypography.bodyMedium)
                                 Text("\(item.category.displayName) • \(item.frequency.displayName) • Next due \(AustralianDateHelper.formatShortDate(item.nextDueDate, timeZoneId: store.profile.timeZoneId))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .font(DaylightTypography.caption)
+                                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text(AustralianMoneyFormatter.format(cents: item.amountCents))
-                                    .font(.subheadline.weight(.bold))
-                                    .monospacedDigit()
+                                    .font(DaylightTypography.financialAmount(size: 15, weight: .bold))
                                 if normalizedForPeriodCents != item.amountCents {
                                     Text("\(AustralianMoneyFormatter.format(cents: normalizedForPeriodCents)) / \(summary.totalDaysInPeriod)d period")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .font(DaylightTypography.finePrint)
+                                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                                         .monospacedDigit()
                                 }
                             }
@@ -554,6 +647,18 @@ public struct BudgetsView: View {
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
+
+                    ForEach(summary.reconciliationNotices) { notice in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(DaylightTheme.accent)
+                            Text(notice.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 4)
+                    }
                 }
             }
         }
@@ -569,11 +674,7 @@ public struct BudgetsView: View {
                         Menu {
                             ForEach(AustralianCategory.expenseCategories) { cat in
                                 Button {
-                                    newBudgetCategory = cat
-                                    if let existing = store.categoryBudgetProgress.first(where: { $0.category == cat }) {
-                                        newBudgetDollars = AustralianMoneyFormatter.formatEditableDecimal(cents: existing.baseLimitCents)
-                                        newBudgetRollover = store.categoryBudgets.first(where: { $0.category == cat })?.rolloverEnabled ?? false
-                                    }
+                                    populateCategoryBudgetDraft(for: cat)
                                 } label: {
                                     if cat == newBudgetCategory {
                                         Label(cat.displayName, systemImage: "checkmark")
@@ -587,18 +688,43 @@ public struct BudgetsView: View {
                         }
                     }
 
-                    TextField("Base Limit for \(activePeriodLabel) in AUD (e.g. 380.00)", text: $newBudgetDollars)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Time Period")
+                            .font(.subheadline)
+                        Picker("Time Period", selection: $newBudgetPeriodType) {
+                            Text("Weekly").tag(PayFrequency.weekly)
+                            Text("Fortnight").tag(PayFrequency.fortnightly)
+                            Text("Month").tag(PayFrequency.monthly)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    .padding(.vertical, 2)
+
+                    TextField("Base Limit per \(categoryPeriodUnitLabel(newBudgetPeriodType)) in AUD (e.g. 380.00)", text: $newBudgetDollars)
                         .focused($budgetLimitFieldFocused)
                         #if os(iOS)
                         .keyboardType(.decimalPad)
                         #endif
 
+                    if let parsedCents = AustralianMoneyFormatter.parseToCents(newBudgetDollars), parsedCents > 0 {
+                        HStack {
+                            Text("Selected category limit")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(AustralianMoneyFormatter.format(cents: parsedCents)) / \(categoryPeriodUnitLabel(newBudgetPeriodType))")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(DaylightTheme.accent)
+                                .monospacedDigit()
+                        }
+                    }
+
                     Toggle("Enable Unspent Rollover to Next Period", isOn: $newBudgetRollover)
                 } footer: {
                     if effectiveFixedCategorySet.contains(newBudgetCategory) {
-                        Text("\(newBudgetCategory.displayName) is a fixed-bill category. Its category card will track bill spending, while Safe-to-Spend continues reserving fixed bills once so they are never double-counted.")
+                        Text("\(newBudgetCategory.displayName) is a fixed-bill category. It stays tracked per \(categoryPeriodUnitLabel(newBudgetPeriodType)) as entered and is reserved in Safe-to-Spend without double-counting.")
                     } else {
-                        Text("This base limit applies to your active \(activePeriodLabel.lowercased()) period and scales automatically if you switch between fortnightly, weekly, or calendar-month budgeting.")
+                        Text("Your category limit stays displayed and tracked per \(categoryPeriodUnitLabel(newBudgetPeriodType)) exactly as entered.")
                     }
                 }
 
@@ -624,7 +750,8 @@ public struct BudgetsView: View {
                             store.upsertCategoryBudget(
                                 category: newBudgetCategory,
                                 limitCents: cents,
-                                rolloverEnabled: newBudgetRollover
+                                rolloverEnabled: newBudgetRollover,
+                                periodType: newBudgetPeriodType
                             )
                             showingAddCategoryBudget = false
                         } else {
@@ -801,7 +928,7 @@ public struct BillsAndSubscriptionsView: View {
                         }
                         Text("Confirmed Scheduled Payments vs Predicted Bills")
                             .font(.headline)
-                        Text("Daylight detects recurring bills from your transaction history (BPAY, Direct Debit, Osko, and card subscriptions). Note: Confirming or dismissing a bill updates your budget forecast; to cancel a direct debit or subscription, contact the merchant or your bank directly.")
+                        Text("Detect recurring bills, update forecasts, and manage cancellations through your bank or merchant.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -855,7 +982,8 @@ public struct BillsAndSubscriptionsView: View {
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Bills & Subscriptions")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -966,7 +1094,7 @@ public struct BillsAndSubscriptionsView: View {
     }
 
     private func billRow(_ bill: RecurringPaymentPrediction, isConfirmedSection: Bool) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: DaylightTheme.Spacing.sm) {
             Image(systemName: bill.category.symbolName)
                 .foregroundStyle(bill.category.tintColor)
                 .frame(width: 36, height: 36)
@@ -975,7 +1103,7 @@ public struct BillsAndSubscriptionsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(bill.merchantName)
-                        .font(.subheadline.weight(.semibold))
+                        .font(DaylightTypography.bodyMedium)
                     DaylightBadge(
                         bill.confidence.displayName,
                         icon: bill.isConfirmedByUser ? "checkmark.seal.fill" : "waveform.path.ecg",
@@ -984,26 +1112,26 @@ public struct BillsAndSubscriptionsView: View {
                 }
 
                 Text("Next expected: \(AustralianDateHelper.formatMediumDate(bill.nextExpectedDate, timeZoneId: store.profile.timeZoneId)) • \(bill.frequency.displayName) • \(bill.paymentRail)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(DaylightTypography.caption)
+                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
 
                 Text("Last payment: \(AustralianDateHelper.formatShortDate(bill.lastPaymentDate, timeZoneId: store.profile.timeZoneId)) • Linked evidence: \(max(1, bill.linkedTransactionIds.count)) txn(s)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(DaylightTypography.finePrint)
+                    .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
 
                 if !isConfirmedSection {
                     HStack(spacing: 10) {
                         Button("Confirm Schedule") {
                             store.confirmRecurringPrediction(id: bill.id)
                         }
-                        .font(.caption.weight(.semibold))
+                        .font(DaylightTypography.captionMedium)
                         .buttonStyle(.borderedProminent)
                         .tint(DaylightTheme.positive)
 
                         Button("Dismiss Suggestion", role: .destructive) {
                             store.dismissRecurringPrediction(id: bill.id)
                         }
-                        .font(.caption)
+                        .font(DaylightTypography.captionMedium)
                         .buttonStyle(.bordered)
                     }
                     .padding(.top, 4)
@@ -1014,14 +1142,13 @@ public struct BillsAndSubscriptionsView: View {
 
             VStack(alignment: .trailing, spacing: 4) {
                 Text(AustralianMoneyFormatter.format(cents: bill.expectedAmountCents))
-                    .font(.subheadline.weight(.bold))
-                    .monospacedDigit()
+                    .font(DaylightTypography.financialAmount(size: 15, weight: .bold))
 
                 if isConfirmedSection {
                     Button("Remove", role: .destructive) {
                         store.dismissRecurringPrediction(id: bill.id)
                     }
-                    .font(.caption2)
+                    .font(DaylightTypography.finePrint)
                 }
             }
         }
@@ -1067,9 +1194,6 @@ public struct SavingsGoalsView: View {
                         DaylightBadge("Transparent Savings Planner", icon: "target", tone: .positive)
                         Text("Track Your Goals With Clear Assumptions")
                             .font(.headline)
-                        Text("Savings goals track your recorded progress and calculate required per-payday contributions. Goal balances do not imply funds are held in a separate custodial account unless verified in your bank account, and no investment returns are promised.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -1093,7 +1217,8 @@ public struct SavingsGoalsView: View {
             .frame(maxWidth: 1180)
             .frame(maxWidth: .infinity)
         }
-        .background(DaylightTheme.background(for: colorScheme).ignoresSafeArea())
+        .background(DaylightAtmosphericBackground())
+        .reportsDaylightScrollPosition()
         .navigationTitle("Savings Goals")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1142,11 +1267,11 @@ public struct SavingsGoalsView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(goal.name)
-                            .font(.headline)
+                            .font(DaylightTypography.cardTitle)
                         if let targetDate = goal.targetDate {
                             Text("Target date: \(AustralianDateHelper.formatMediumDate(targetDate, timeZoneId: store.profile.timeZoneId))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(DaylightTypography.caption)
+                                .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                         }
                     }
 
@@ -1161,7 +1286,7 @@ public struct SavingsGoalsView: View {
                         selectedGoalForEdit = goal
                     } label: {
                         Label("Edit Goal", systemImage: "pencil")
-                            .font(.caption.weight(.semibold))
+                            .font(DaylightTypography.captionMedium)
                     }
                     .buttonStyle(.bordered)
 
@@ -1171,7 +1296,7 @@ public struct SavingsGoalsView: View {
                         selectedGoalForContribution = goal
                     } label: {
                         Label("Add Amount", systemImage: "plus.circle.fill")
-                            .font(.caption.weight(.semibold))
+                            .font(DaylightTypography.captionMedium)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(DaylightTheme.accent)
@@ -1182,32 +1307,32 @@ public struct SavingsGoalsView: View {
 
                 HStack {
                     Text("Saved: \(AustralianMoneyFormatter.format(cents: goal.currentSavedCents)) (\(Int(round(ratio * 100)))%)")
-                        .font(.subheadline.weight(.semibold))
+                        .font(DaylightTypography.subheadlineMedium)
                         .monospacedDigit()
                     Spacer()
                     Text("Target: \(AustralianMoneyFormatter.format(cents: goal.targetAmountCents))")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .font(DaylightTypography.caption)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                         .monospacedDigit()
                 }
 
                 if let suggested = suggestedPerCycleCents {
                     Text("Suggested schedule: \(AustralianMoneyFormatter.format(cents: suggested)) per \(cadenceLabel) to reach target on time.")
-                        .font(.caption.weight(.medium))
+                        .font(DaylightTypography.captionMedium)
                         .foregroundStyle(DaylightTheme.accent)
                         .monospacedDigit()
                 }
 
                 HStack {
                     Text("Assumptions: \(goal.assumptionsNote)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(DaylightTypography.finePrint)
+                        .foregroundStyle(DaylightTheme.textSecondary(for: colorScheme))
                     Spacer()
                     Button(role: .destructive) {
                         store.deleteSavingsGoal(id: goal.id)
                     } label: {
                         Label("Delete Goal", systemImage: "trash")
-                            .font(.caption2)
+                            .font(DaylightTypography.finePrint)
                     }
                     .buttonStyle(.borderless)
                 }

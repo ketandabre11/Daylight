@@ -30,6 +30,7 @@ public enum StoreAuthorizationError: LocalizedError, Equatable {
     case crossTenantAccessDenied(requestedTenant: String, activeTenant: String)
     case duplicateIdempotencyKey(String)
     case invalidSplitTotal(expectedCents: MoneyCents, actualCents: MoneyCents)
+    case invalidTransactionDirection(kind: TransactionKind, direction: TransactionDirection)
 
     public var errorDescription: String? {
         switch self {
@@ -39,6 +40,8 @@ public enum StoreAuthorizationError: LocalizedError, Equatable {
             return "Duplicate request prevented by idempotency key '\(key)'."
         case .invalidSplitTotal(let expected, let actual):
             return "Split amounts (\(AustralianMoneyFormatter.format(cents: actual))) must equal the transaction total (\(AustralianMoneyFormatter.format(cents: expected)))."
+        case .invalidTransactionDirection(let kind, let direction):
+            return "\(kind.displayName) cannot use the \(direction == .debit ? "expense" : "income") direction."
         }
     }
 }
@@ -75,12 +78,15 @@ public final class DaylightStore {
     }
 
     public var referenceDate: Date
+    /// When true (default for live persisted sessions), `referenceDate` tracks the live system clock on recalculation and foreground entry.
+    public var usesLiveClock: Bool
 
     private var demoWorkspace: TenantWorkspaceSnapshot
     private var personalWorkspace: TenantWorkspaceSnapshot
     private let persistToDisk: Bool
     public let sqliteDatabase: SQLitePersistenceDatabase?
     public let authService: any DaylightAuthenticationServiceProtocol
+    private var notificationSyncTask: Task<Void, Never>?
 
     /// Authentication state & navigation route
     public var authState: AuthenticationState = .signedOut
@@ -97,10 +103,11 @@ public final class DaylightStore {
     public private(set) var allowanceSummary: DailyAllowanceSummary
     public private(set) var categoryBudgetProgress: [CategoryBudgetProgress]
     public private(set) var activeInsights: [FinancialInsight]
+    public private(set) var monthlySpendingAnalytics: MonthlySpendingAnalytics?
     public private(set) var workspaceCategories: [TransactionCategoryRecord] = []
 
     /// UI Navigation state
-    public var selectedSection: AppNavigationSection = .overview
+    public var selectedSection: AppNavigationSection = ProcessInfo.processInfo.arguments.contains("-settings") ? .settings : (ProcessInfo.processInfo.arguments.contains("-insights") ? .insights : .overview)
     public var showingCalculationExplainer: Bool = false
     public var showingStatementImporter: Bool = false
     public var showingNotificationsSheet: Bool = false
@@ -109,6 +116,7 @@ public final class DaylightStore {
     public var transactionCategoryDrilldown: AustralianCategory? = nil
     public var customCategoryFilterId: String? = nil
     public var statusBannerMessage: String? = nil
+    public private(set) var persistenceErrorMessage: String? = nil
 
     public var activeTenantId: String {
         isDemoMode ? Self.demoTenantId : (activeAuthenticatedTenantId ?? Self.personalTenantId)
@@ -160,20 +168,61 @@ public final class DaylightStore {
         activeWorkspace.notifications.filter { !$0.isRead }.count
     }
 
+    /// Track dismissed duplicate transaction pair IDs for the active session and workspace
+    public var dismissedDuplicatePairIds: Set<String> = []
+
+    /// Detected potential and confirmed duplicate transactions in the active workspace
+    public var duplicateCandidates: [DuplicateCandidateGroup] {
+        DuplicateDetectionService.shared.detectDuplicates(
+            transactions: activeWorkspace.transactions,
+            dismissedPairIds: dismissedDuplicatePairIds
+        )
+    }
+
+    /// Dismiss a duplicate alert so it is not shown again in this workspace
+    public func dismissDuplicateCandidate(id: String) {
+        dismissedDuplicatePairIds.insert(id)
+    }
+
     public var authenticatedSession: AuthenticatedSession? {
         authState.currentSession
+    }
+
+    public var userDisplayName: String {
+        let profileName = profile.preferredName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionName = authenticatedSession?.fullName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isRealSession = authenticatedSession != nil && authenticatedSession?.userId != "demo_user_au"
+
+        if isRealSession && !sessionName.isEmpty && (profileName.isEmpty || profileName == "Alex" || profileName == "Friend") {
+            return sessionName
+        }
+        if !profileName.isEmpty && profileName != "Alex" && profileName != "Friend" {
+            return profileName
+        }
+        if !sessionName.isEmpty && sessionName != "Alex" {
+            return sessionName
+        }
+        return "Ketan"
+    }
+
+    public var greetingName: String {
+        let name = userDisplayName
+        let first = name.split(separator: " ").first.map(String.init) ?? name
+        return first.isEmpty ? "Ketan" : first
     }
 
     public init(
         referenceDate: Date = Date(),
         startInDemoMode: Bool = true,
         persistToDisk: Bool = true,
+        databaseURL: URL? = nil,
         authService: (any DaylightAuthenticationServiceProtocol)? = nil
     ) {
         self.referenceDate = referenceDate
+        self.usesLiveClock = persistToDisk && (databaseURL == nil)
         self.persistToDisk = persistToDisk
 
-        let dbInstance = try? SQLitePersistenceDatabase(inMemory: !persistToDisk)
+        let dbInstance = try? SQLitePersistenceDatabase(databaseURL: databaseURL, inMemory: !persistToDisk)
         self.sqliteDatabase = dbInstance
         self.authService = authService ?? DaylightAuthenticationService(useInMemoryMock: !persistToDisk)
 
@@ -203,7 +252,7 @@ public final class DaylightStore {
             }
         }
 
-        let resolvedPersonal: TenantWorkspaceSnapshot
+        var resolvedPersonal: TenantWorkspaceSnapshot
         if persistToDisk, let sqlPersonal = try? dbInstance?.loadTenantSnapshot(tenantId: Self.personalTenantId) {
             resolvedPersonal = sqlPersonal
         } else if persistToDisk, let legacyPersonal = Self.loadWorkspaceFromDisk(tenantId: Self.personalTenantId) {
@@ -215,24 +264,34 @@ public final class DaylightStore {
                 try? dbInstance?.saveTenantSnapshot(initialPersonal)
             }
         }
+        if Self.sanitizeUntouchedLegacyPlaceholderProfile(&resolvedPersonal), persistToDisk {
+            try? dbInstance?.saveTenantSnapshot(resolvedPersonal)
+        }
 
         self.demoWorkspace = resolvedDemo
         self.personalWorkspace = resolvedPersonal
 
         let currentWS = savedMode ? resolvedDemo : resolvedPersonal
+        let activeTid = savedMode ? Self.demoTenantId : Self.personalTenantId
+        let fetchedCats = (try? dbInstance?.fetchCategories(forTenant: activeTid, includeArchived: true)) ?? []
+        let initialArchivedCats = Set(fetchedCats.filter(\.isArchived).compactMap { AustralianCategory(rawValue: $0.categoryCode) })
+
         let initialSummary = FinancialCalculationEngine.calculateDailyAllowanceSummary(
             referenceDate: referenceDate,
             profile: currentWS.profile,
             accounts: currentWS.accounts,
             transactions: currentWS.transactions,
             fixedCommitments: currentWS.fixedCommitments,
-            categoryBudgets: currentWS.categoryBudgets
+            categoryBudgets: currentWS.categoryBudgets,
+            savingsGoals: currentWS.savingsGoals,
+            archivedCategories: initialArchivedCats
         )
         let initialCatProgress = FinancialCalculationEngine.calculateCategoryBudgetsProgress(
             referenceDate: referenceDate,
             profile: currentWS.profile,
             transactions: currentWS.transactions,
-            categoryBudgets: currentWS.categoryBudgets
+            categoryBudgets: currentWS.categoryBudgets,
+            archivedCategories: initialArchivedCats
         )
         let initialInsights = FinancialCalculationEngine.generateDeterministicInsights(
             referenceDate: referenceDate,
@@ -247,24 +306,65 @@ public final class DaylightStore {
         self.allowanceSummary = initialSummary
         self.categoryBudgetProgress = initialCatProgress
         self.activeInsights = initialInsights
-        let activeTid = savedMode ? Self.demoTenantId : Self.personalTenantId
-        self.workspaceCategories = (try? dbInstance?.fetchCategories(forTenant: activeTid, includeArchived: true)) ?? []
+        self.workspaceCategories = fetchedCats
+
+        let initCal = AustralianDateHelper.calendar(for: currentWS.profile.timeZoneId)
+        let initY = initCal.component(.year, from: referenceDate)
+        let initM = initCal.component(.month, from: referenceDate)
+        self.monthlySpendingAnalytics = SpendingAnalyticsService.shared.calculateMonthlyAnalytics(
+            forYear: initY,
+            month: initM,
+            referenceDate: referenceDate,
+            transactions: currentWS.transactions,
+            categoryBudgets: currentWS.categoryBudgets,
+            savingsGoals: currentWS.savingsGoals,
+            timeZoneId: currentWS.profile.timeZoneId
+        )
     }
 
     // MARK: - Derived State Refresh
 
+    /// Cleans up untouched legacy personal workspaces that previously seeded $3,250 pay / $500 savings ($91/day monthly)
+    /// before the user ever entered income, budgets, commitments, or transactions.
+    @discardableResult
+    public static func sanitizeUntouchedLegacyPlaceholderProfile(_ ws: inout TenantWorkspaceSnapshot) -> Bool {
+        guard ws.tenantId != demoTenantId else { return false }
+        guard ws.profile.typicalTakeHomePayCents == 325_000,
+              ws.profile.savingsTargetPerPeriodCents == 50_000,
+              ws.transactions.isEmpty,
+              ws.fixedCommitments.isEmpty,
+              ws.categoryBudgets.isEmpty,
+              ws.savingsGoals.isEmpty,
+              ws.auditEvents.isEmpty else {
+            return false
+        }
+        ws.profile.typicalTakeHomePayCents = 0
+        ws.profile.savingsTargetPerPeriodCents = 0
+        ws.notifications.removeAll { $0.categoryTag == "daily_summary" }
+        return true
+    }
+
+    /// Advances `referenceDate` to the current wall-clock date/time when running live, recalculates derived summaries,
+    /// and synchronizes OS notifications so day rollovers and foreground activations are always accurate.
+    public func syncLiveReferenceDateAndNotifications() {
+        if usesLiveClock {
+            referenceDate = Date()
+        }
+        recalculateDerivedState()
+    }
+
     public func recalculateDerivedState() {
+        if usesLiveClock {
+            referenceDate = Date()
+        }
         var ws = isDemoMode ? demoWorkspace : personalWorkspace
         ws.recurringPredictions = FinancialCalculationEngine.detectRecurringPayments(
             tenantId: ws.tenantId,
             transactions: ws.transactions,
             existingPredictions: ws.recurringPredictions
         )
-        if isDemoMode {
-            demoWorkspace = ws
-        } else {
-            personalWorkspace = ws
-        }
+
+        let archivedCats = Set(workspaceCategories.filter(\.isArchived).compactMap { AustralianCategory(rawValue: $0.categoryCode) })
 
         let summary = FinancialCalculationEngine.calculateDailyAllowanceSummary(
             referenceDate: referenceDate,
@@ -272,13 +372,16 @@ public final class DaylightStore {
             accounts: ws.accounts,
             transactions: ws.transactions,
             fixedCommitments: ws.fixedCommitments,
-            categoryBudgets: ws.categoryBudgets
+            categoryBudgets: ws.categoryBudgets,
+            savingsGoals: ws.savingsGoals,
+            archivedCategories: archivedCats
         )
         let catProgress = FinancialCalculationEngine.calculateCategoryBudgetsProgress(
             referenceDate: referenceDate,
             profile: ws.profile,
             transactions: ws.transactions,
-            categoryBudgets: ws.categoryBudgets
+            categoryBudgets: ws.categoryBudgets,
+            archivedCategories: archivedCats
         )
         let insights = FinancialCalculationEngine.generateDeterministicInsights(
             referenceDate: referenceDate,
@@ -290,9 +393,100 @@ public final class DaylightStore {
             savingsGoals: ws.savingsGoals
         )
 
+        // Keep any existing in-app daily summary notification for today synchronized with latest real figures
+        let auCal = AustralianDateHelper.calendar(for: ws.profile.timeZoneId)
+        if let todaySummaryIdx = ws.notifications.firstIndex(where: {
+            $0.categoryTag == "daily_summary" && auCal.isDate($0.createdAt, inSameDayAs: referenceDate)
+        }) {
+            let refreshedPayload = DaylightNotificationScheduler.buildDailyEveningSummary(
+                tenantId: ws.tenantId,
+                referenceDate: referenceDate,
+                timeZoneId: ws.profile.timeZoneId,
+                summary: summary,
+                preferences: ws.notificationPreferences
+            )
+            ws.notifications[todaySummaryIdx].title = refreshedPayload.title
+            ws.notifications[todaySummaryIdx].body = refreshedPayload.body
+        }
+
+        if isDemoMode {
+            demoWorkspace = ws
+        } else {
+            personalWorkspace = ws
+        }
+
         self.allowanceSummary = summary
         self.categoryBudgetProgress = catProgress
         self.activeInsights = insights
+
+        let calY = auCal.component(.year, from: referenceDate)
+        let calM = auCal.component(.month, from: referenceDate)
+        self.monthlySpendingAnalytics = SpendingAnalyticsService.shared.calculateMonthlyAnalytics(
+            forYear: calY,
+            month: calM,
+            referenceDate: referenceDate,
+            transactions: ws.transactions,
+            categoryBudgets: ws.categoryBudgets,
+            savingsGoals: ws.savingsGoals,
+            timeZoneId: ws.profile.timeZoneId
+        )
+
+        if persistToDisk {
+            syncOSNotificationsInBackground(workspace: ws, summary: summary)
+        }
+    }
+
+    /// Calculates or returns spending analytics for a specific year and month within the active workspace.
+    public func spendingAnalytics(forYear year: Int, month: Int) -> MonthlySpendingAnalytics {
+        let ws = isDemoMode ? demoWorkspace : personalWorkspace
+        return SpendingAnalyticsService.shared.calculateMonthlyAnalytics(
+            forYear: year,
+            month: month,
+            referenceDate: referenceDate,
+            transactions: ws.transactions,
+            categoryBudgets: ws.categoryBudgets,
+            savingsGoals: ws.savingsGoals,
+            timeZoneId: ws.profile.timeZoneId
+        )
+    }
+
+    private func syncOSNotificationsInBackground(
+        workspace ws: TenantWorkspaceSnapshot,
+        summary: DailyAllowanceSummary
+    ) {
+        let tenant = ws.tenantId
+        let refDate = referenceDate
+        let currentProfile = ws.profile
+        let currentPrefs = ws.notificationPreferences
+        let currentAccounts = ws.accounts
+        let currentTransactions = ws.transactions
+        let currentFixed = ws.fixedCommitments
+        let currentBudgets = ws.categoryBudgets
+        let demoFlag = isDemoMode
+        notificationSyncTask?.cancel()
+        notificationSyncTask = Task { [weak self] in
+            let result = await DaylightNotificationScheduler.syncScheduledOSNotifications(
+                tenantId: tenant,
+                referenceDate: refDate,
+                profile: currentProfile,
+                summary: currentSummaryForSync(summary),
+                preferences: currentPrefs,
+                accounts: currentAccounts,
+                transactions: currentTransactions,
+                fixedCommitments: currentFixed,
+                categoryBudgets: currentBudgets,
+                recurringPredictions: ws.recurringPredictions,
+                isDemoMode: demoFlag
+            )
+            guard !Task.isCancelled, let self else { return }
+            if !result {
+                self.statusBannerMessage = "Notification schedules could not be updated. Check notification permission in Settings."
+            }
+        }
+    }
+
+    private func currentSummaryForSync(_ summary: DailyAllowanceSummary) -> DailyAllowanceSummary {
+        summary
     }
 
     // MARK: - Security & Tenant Isolation Enforcement
@@ -349,6 +543,10 @@ public final class DaylightStore {
     /// Restores an active authenticated session on app launch if valid and unexpired.
     public func restoreAuthenticatedSessionIfAvailable() async {
         authErrorMessage = nil
+        if ProcessInfo.processInfo.arguments.contains("-startDemo") {
+            enterSyntheticDemoWorkspace()
+            return
+        }
         do {
             if let session = try await authService.restoreSession(now: referenceDate) {
                 try activateAuthenticatedSession(session, isNewRegistration: false)
@@ -369,7 +567,8 @@ public final class DaylightStore {
         fullName: String,
         email: String,
         password: String,
-        confirmPassword: String
+        confirmPassword: String,
+        avatarImageData: Data? = nil
     ) async throws {
         guard !isAuthSubmitting else { return }
         let validation = AuthFormValidator.validateRegistration(
@@ -394,7 +593,7 @@ public final class DaylightStore {
                 password: password,
                 now: referenceDate
             )
-            try activateAuthenticatedSession(session, isNewRegistration: true)
+            try activateAuthenticatedSession(session, isNewRegistration: true, avatarImageData: avatarImageData)
         } catch {
             authErrorMessage = error.localizedDescription
             throw error
@@ -449,7 +648,11 @@ public final class DaylightStore {
             providerMode: authService.providerMode
         )
         authState = .authenticated(demoSession)
-        selectedSection = .overview
+        if ProcessInfo.processInfo.arguments.contains("-settings") {
+            selectedSection = .settings
+        } else {
+            selectedSection = .overview
+        }
         refreshWorkspaceCategories()
         recalculateDerivedState()
     }
@@ -469,13 +672,17 @@ public final class DaylightStore {
         authState = .signedOut
         authNavigationRoute = .welcome
         selectedSection = .overview
+        if persistToDisk {
+            await DaylightNotificationScheduler.clearAllScheduledOSNotifications()
+        }
         refreshWorkspaceCategories()
         recalculateDerivedState()
     }
 
     private func activateAuthenticatedSession(
         _ session: AuthenticatedSession,
-        isNewRegistration: Bool
+        isNewRegistration: Bool,
+        avatarImageData: Data? = nil
     ) throws {
         clearInMemoryAccountCaches()
         let tenantId = session.workspaceTenantId
@@ -489,15 +696,21 @@ public final class DaylightStore {
         if !isNewRegistration,
            let existing = try? sqliteDatabase?.loadTenantSnapshot(tenantId: tenantId) {
             var ws = existing
+            ws.tenantId = tenantId
+            ws.profile.tenantId = tenantId
+            _ = Self.sanitizeUntouchedLegacyPlaceholderProfile(&ws)
             if !cleanSessionName.isEmpty {
                 ws.profile.preferredName = cleanSessionName
             }
             if !session.email.isEmpty {
                 ws.profile.email = session.email
             }
+            if let avatarImageData {
+                ws.profile.avatarImageData = avatarImageData
+            }
             loadedOrCreatedWorkspace = ws
         } else {
-            let freshWorkspace = Self.makeBlankPersonalWorkspace(
+            var freshWorkspace = Self.makeBlankPersonalWorkspace(
                 referenceDate: referenceDate,
                 tenantId: tenantId,
                 preferredName: cleanSessionName,
@@ -505,6 +718,9 @@ public final class DaylightStore {
                 onboardingCompleted: true,
                 includeDefaultEverydayAccount: true
             )
+            if let avatarImageData {
+                freshWorkspace.profile.avatarImageData = avatarImageData
+            }
             try? sqliteDatabase?.saveTenantSnapshot(freshWorkspace)
             loadedOrCreatedWorkspace = freshWorkspace
         }
@@ -545,7 +761,11 @@ public final class DaylightStore {
         personalWorkspace = loadedOrCreatedWorkspace
         isDemoMode = false
         authState = .authenticated(session)
-        selectedSection = .overview
+        if ProcessInfo.processInfo.arguments.contains("-settings") {
+            selectedSection = .settings
+        } else {
+            selectedSection = .overview
+        }
         refreshWorkspaceCategories()
         recalculateDerivedState()
     }
@@ -615,8 +835,8 @@ public final class DaylightStore {
                     accountType: .everydayTransaction,
                     maskedAccountNumber: "•••• 1001",
                     currencyCode: "AUD",
-                    availableBalanceCents: max(takeHomePayCents, 150_000),
-                    currentBalanceCents: max(takeHomePayCents, 150_000),
+                    availableBalanceCents: 0,
+                    currentBalanceCents: 0,
                     balanceUpdatedAt: Date(),
                     connectionStatus: .manual,
                     lastSuccessfulSyncAt: Date(),
@@ -660,6 +880,44 @@ public final class DaylightStore {
         )
     }
 
+    /// Switches the profile pay frequency while preserving the user's annual income and savings.
+    /// Take-home pay and per-period savings are rescaled using annualised equivalence
+    /// (52 weeks = 26 fortnights = 12 months = 13 four-week cycles), integer cents, half-up rounding.
+    /// Example: $3,250.00 fortnightly → $7,041.67 monthly (3,250 × 26 ÷ 12).
+    public func changePayFrequency(to newFrequency: PayFrequency) throws {
+        let oldFrequency = profile.payFrequency
+        guard newFrequency != oldFrequency else { return }
+        var p = profile
+        p.tenantId = activeTenantId
+        p.typicalTakeHomePayCents = FinancialCalculationEngine.normalizedAmountForCalculation(
+            amountCents: max(0, p.typicalTakeHomePayCents),
+            from: oldFrequency,
+            to: newFrequency
+        )
+        p.savingsTargetPerPeriodCents = FinancialCalculationEngine.normalizedAmountForCalculation(
+            amountCents: max(0, p.savingsTargetPerPeriodCents),
+            from: oldFrequency,
+            to: newFrequency
+        )
+        p.payFrequency = newFrequency
+        try updateProfile(p)
+    }
+
+    /// Updates the user's profile avatar picture (or removes it if nil) and persists it in SQLite and active workspace.
+    public func updateProfileAvatar(imageData: Data?) throws {
+        var p = profile
+        p.tenantId = activeTenantId
+        p.avatarImageData = imageData
+        p.updatedAt = Date()
+        try updateProfile(p)
+        recordAudit(
+            action: imageData == nil ? "PROFILE_AVATAR_REMOVED" : "PROFILE_AVATAR_UPDATED",
+            entityType: "UserProfile",
+            entityId: p.id.uuidString,
+            summary: imageData == nil ? "Removed custom profile avatar." : "Updated profile avatar (\(imageData?.count ?? 0) bytes)."
+        )
+    }
+
     private func syncAuthenticatedSessionFullNameIfNeeded(_ newFullName: String) {
         let cleanName = newFullName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty, let existingSession = authState.currentSession else { return }
@@ -690,6 +948,7 @@ public final class DaylightStore {
         occurredAt: Date,
         userNote: String,
         excludeFromBudget: Bool,
+        linkedFixedCommitmentId: UUID? = nil,
         idempotencyKey: String? = nil
     ) throws {
         var ws = activeWorkspace
@@ -759,6 +1018,7 @@ public final class DaylightStore {
             userNote: userNote,
             excludeFromBudget: excludeFromBudget,
             linkedOriginalTransactionId: nil,
+            linkedFixedCommitmentId: linkedFixedCommitmentId,
             splits: [],
             calculationVersion: FinancialCalculationEngine.currentCalculationVersion,
             updatedAt: Date()
@@ -784,9 +1044,13 @@ public final class DaylightStore {
 
     public func updateTransaction(
         _ updated: TransactionRecord,
-        createMerchantRuleForFuture: Bool = false
+        createMerchantRuleForFuture: Bool = false,
+        applyCategoryToUnconfirmed: Bool = false
     ) throws {
         try verifyOwnership(entityTenantId: updated.tenantId)
+        guard FinancialCalculationEngine.isValidDirection(updated.direction, for: updated.kind) else {
+            throw StoreAuthorizationError.invalidTransactionDirection(kind: updated.kind, direction: updated.direction)
+        }
         if !updated.splits.isEmpty {
             let splitSum = updated.splits.reduce(MoneyCents(0)) { $0 + $1.amountCents }
             if splitSum != updated.amountCents {
@@ -832,17 +1096,26 @@ public final class DaylightStore {
         ws.transactions[idx] = copy
 
         if createMerchantRuleForFuture {
-            let rule = MerchantRule(
-                id: UUID(),
+            let optimalSubstring = ClassificationFeedbackService.shared.deriveOptimalMatchSubstring(
+                rawDescription: copy.rawDescription,
+                merchantName: copy.merchantName
+            )
+            let (rule, updatedRules) = ClassificationFeedbackService.shared.createOrUpdateRule(
                 tenantId: activeTenantId,
-                matchSubstring: copy.merchantName.uppercased(),
+                matchSubstring: optimalSubstring,
                 normalizedMerchantName: copy.merchantName,
                 assignedCategory: copy.category,
-                applyToFutureOnly: true,
-                createdAt: Date()
+                applyToFutureOnly: false,
+                existingRules: ws.merchantRules
             )
-            ws.merchantRules.removeAll { $0.matchSubstring.caseInsensitiveCompare(rule.matchSubstring) == .orderedSame }
-            ws.merchantRules.append(rule)
+            ws.merchantRules = updatedRules
+            if applyCategoryToUnconfirmed, copy.category != oldTx.category {
+                let (updatedTransactions, _) = ClassificationFeedbackService.shared.applyLearnedRuleToUnconfirmedTransactions(
+                    rule: rule,
+                    transactions: ws.transactions
+                )
+                ws.transactions = updatedTransactions
+            }
         }
 
         activeWorkspace = ws
@@ -851,6 +1124,56 @@ public final class DaylightStore {
             entityType: "TransactionRecord",
             entityId: copy.id.uuidString,
             summary: "Edited \(copy.merchantName) -> Category: \(copy.category.displayName), Kind: \(copy.kind.displayName)."
+        )
+    }
+
+    /// User category correction with automatic rule learning and optional propagation to matching unconfirmed transactions.
+    public func correctTransactionCategory(
+        transactionId: UUID,
+        newCategory: AustralianCategory,
+        createRule: Bool = true,
+        applyToUnconfirmed: Bool = false
+    ) throws {
+        var ws = activeWorkspace
+        guard let idx = ws.transactions.firstIndex(where: { $0.id == transactionId }) else { return }
+        var tx = ws.transactions[idx]
+        try verifyOwnership(entityTenantId: tx.tenantId)
+
+        tx.category = newCategory
+        tx.classificationConfidence = 1.0
+        tx.updatedAt = Date()
+        ws.transactions[idx] = tx
+
+        if createRule {
+            let optimalSubstring = ClassificationFeedbackService.shared.deriveOptimalMatchSubstring(
+                rawDescription: tx.rawDescription,
+                merchantName: tx.merchantName
+            )
+            let (rule, updatedRules) = ClassificationFeedbackService.shared.createOrUpdateRule(
+                tenantId: activeTenantId,
+                matchSubstring: optimalSubstring,
+                normalizedMerchantName: tx.merchantName,
+                assignedCategory: newCategory,
+                applyToFutureOnly: !applyToUnconfirmed,
+                existingRules: ws.merchantRules
+            )
+            ws.merchantRules = updatedRules
+
+            if applyToUnconfirmed {
+                let (updatedTxs, _) = ClassificationFeedbackService.shared.applyLearnedRuleToUnconfirmedTransactions(
+                    rule: rule,
+                    transactions: ws.transactions
+                )
+                ws.transactions = updatedTxs
+            }
+        }
+
+        activeWorkspace = ws
+        recordAudit(
+            action: "CATEGORY_CORRECTED",
+            entityType: "TransactionRecord",
+            entityId: tx.id.uuidString,
+            summary: "Corrected category for \(tx.merchantName) to \(newCategory.displayName)."
         )
     }
 
@@ -940,6 +1263,8 @@ public final class DaylightStore {
         var duplicateCount = 0
         var rejectedCount = 0
 
+        var importedNetBalanceDeltaCents: MoneyCents = 0
+
         for row in previewRows {
             if row.validationError != nil {
                 rejectedCount += 1
@@ -955,11 +1280,13 @@ public final class DaylightStore {
             }
 
             let isCreditCard = ws.accounts.first(where: { $0.id == targetAccountId })?.accountType == .creditCard
-            let classification = FinancialCalculationEngine.classifyAustralianTransaction(
+            let intelligentClassification = IntelligentCategorisationEngine.shared.classify(
                 rawDescription: row.parsedDescription,
+                amountCents: cents,
                 direction: row.parsedDirection,
                 isCreditCardAccount: isCreditCard,
-                userMerchantRules: ws.merchantRules
+                userMerchantRules: ws.merchantRules,
+                historicalTransactions: ws.transactions
             )
 
             let tx = TransactionRecord(
@@ -968,20 +1295,20 @@ public final class DaylightStore {
                 accountId: targetAccountId,
                 sourceTransactionId: nil,
                 reconciliationFingerprint: row.fingerprint,
-                merchantName: classification.normalizedMerchant,
+                merchantName: intelligentClassification.normalizedMerchant,
                 rawDescription: row.parsedDescription,
                 occurredAt: date,
                 amountCents: cents,
                 direction: row.parsedDirection,
-                category: row.inferredCategory,
-                classificationConfidence: row.classificationConfidence,
+                category: intelligentClassification.category,
+                classificationConfidence: intelligentClassification.confidence,
                 status: .posted,
-                kind: row.inferredKind,
-                isRecurring: row.inferredCategory.isDefaultFixedCommitment,
-                paymentRail: classification.paymentRail ?? "Statement Import",
+                kind: intelligentClassification.kind,
+                isRecurring: intelligentClassification.category.isDefaultFixedCommitment,
+                paymentRail: intelligentClassification.paymentRail ?? "Statement Import",
                 source: .csvStatementImport,
                 userNote: "Imported from \(fileName)",
-                excludeFromBudget: row.inferredKind == .ownAccountTransfer || row.inferredKind == .creditCardRepayment,
+                excludeFromBudget: intelligentClassification.kind == .ownAccountTransfer || intelligentClassification.kind == .creditCardRepayment,
                 linkedOriginalTransactionId: nil,
                 splits: [],
                 calculationVersion: FinancialCalculationEngine.currentCalculationVersion,
@@ -989,6 +1316,14 @@ public final class DaylightStore {
             )
             ws.transactions.append(tx)
             importedCount += 1
+            importedNetBalanceDeltaCents += (row.parsedDirection == .debit ? -abs(cents) : abs(cents))
+        }
+
+        if importedCount > 0,
+           let acctIdx = ws.accounts.firstIndex(where: { $0.id == targetAccountId && $0.connectionStatus == .manual }) {
+            ws.accounts[acctIdx].availableBalanceCents += importedNetBalanceDeltaCents
+            ws.accounts[acctIdx].currentBalanceCents += importedNetBalanceDeltaCents
+            ws.accounts[acctIdx].balanceUpdatedAt = Date()
         }
 
         let job = ImportJobRecord(
@@ -1090,12 +1425,39 @@ public final class DaylightStore {
             isArchived: updated.isArchived
         )
         refreshWorkspaceCategories()
+        recalculateDerivedState()
         recordAudit(
             action: "CUSTOM_CATEGORY_UPDATED",
             entityType: "TransactionCategory",
             entityId: updated.id,
             summary: "Updated custom category '\(updated.name)' (archived: \(updated.isArchived))."
         )
+    }
+
+    public func archiveCategory(_ category: AustralianCategory) {
+        if let idx = workspaceCategories.firstIndex(where: { $0.categoryCode == category.rawValue }) {
+            workspaceCategories[idx].isArchived = true
+            try? sqliteDatabase?.updateCustomCategory(
+                categoryId: workspaceCategories[idx].id,
+                tenantId: activeTenantId,
+                isArchived: true
+            )
+        } else {
+            let record = TransactionCategoryRecord(
+                id: "system:\(category.rawValue)",
+                tenantId: activeTenantId,
+                categoryCode: category.rawValue,
+                name: category.displayName,
+                iconName: category.symbolName,
+                displayOrder: 999,
+                categoryType: .expense,
+                isSystemDefault: true,
+                isCustom: false,
+                isArchived: true
+            )
+            workspaceCategories.append(record)
+        }
+        recalculateDerivedState()
     }
 
     public func moveCustomCategory(categoryId: String, direction: Int) throws {
@@ -1156,23 +1518,39 @@ public final class DaylightStore {
     public func upsertCategoryBudget(
         category: AustralianCategory,
         limitCents: MoneyCents,
-        rolloverEnabled: Bool
+        rolloverEnabled: Bool,
+        periodType: PayFrequency? = nil,
+        linkedFixedCommitmentId: UUID? = nil
     ) {
         var ws = activeWorkspace
+        let defaultActivePeriodType: PayFrequency = (ws.profile.preferredBudgetingMethod == .monthlyFlexible)
+            ? .monthly
+            : ws.profile.payFrequency
+        let sanitizedLimit = max(0, limitCents)
+        let resolvedPeriodType: PayFrequency
+
         if let idx = ws.categoryBudgets.firstIndex(where: { $0.category == category }) {
-            ws.categoryBudgets[idx].limitCents = max(0, limitCents)
+            let keptPeriod = periodType ?? ws.categoryBudgets[idx].periodType
+            resolvedPeriodType = keptPeriod
+            ws.categoryBudgets[idx].limitCents = sanitizedLimit
             ws.categoryBudgets[idx].rolloverEnabled = rolloverEnabled
+            ws.categoryBudgets[idx].periodType = keptPeriod
+            if let linkedFixedCommitmentId {
+                ws.categoryBudgets[idx].linkedFixedCommitmentId = linkedFixedCommitmentId
+            }
             ws.categoryBudgets[idx].updatedAt = Date()
         } else {
+            resolvedPeriodType = periodType ?? defaultActivePeriodType
             ws.categoryBudgets.append(
                 CategoryBudget(
                     id: UUID(),
                     tenantId: activeTenantId,
                     category: category,
-                    limitCents: max(0, limitCents),
+                    limitCents: sanitizedLimit,
                     rolloverEnabled: rolloverEnabled,
                     rolloverBalanceCents: 0,
-                    periodType: ws.profile.payFrequency,
+                    periodType: resolvedPeriodType,
+                    linkedFixedCommitmentId: linkedFixedCommitmentId,
                     updatedAt: Date()
                 )
             )
@@ -1182,7 +1560,7 @@ public final class DaylightStore {
             action: "CATEGORY_BUDGET_UPSERTED",
             entityType: "CategoryBudget",
             entityId: category.rawValue,
-            summary: "Set \(category.displayName) budget to \(AustralianMoneyFormatter.format(cents: limitCents))."
+            summary: "Set \(category.displayName) budget to \(AustralianMoneyFormatter.format(cents: sanitizedLimit)) (\(resolvedPeriodType.displayName))."
         )
     }
 
@@ -1200,13 +1578,16 @@ public final class DaylightStore {
         nextDueDate: Date
     ) {
         var ws = activeWorkspace
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return }
+        let sanitizedAmount = max(0, amountCents)
         ws.fixedCommitments.append(
             FixedCommitment(
                 id: UUID(),
                 tenantId: activeTenantId,
-                title: title,
+                title: trimmedTitle,
                 category: category,
-                amountCents: max(0, amountCents),
+                amountCents: sanitizedAmount,
                 frequency: frequency,
                 nextDueDate: nextDueDate,
                 isConfirmed: true
@@ -1216,8 +1597,35 @@ public final class DaylightStore {
         recordAudit(
             action: "FIXED_COMMITMENT_ADDED",
             entityType: "FixedCommitment",
-            entityId: title,
-            summary: "Added fixed commitment '\(title)' (\(AustralianMoneyFormatter.format(cents: amountCents)) \(frequency.displayName))."
+            entityId: trimmedTitle,
+            summary: "Added fixed commitment '\(trimmedTitle)' (\(AustralianMoneyFormatter.format(cents: sanitizedAmount)) \(frequency.displayName))."
+        )
+    }
+
+    public func updateFixedCommitment(
+        id: UUID,
+        title: String,
+        category: AustralianCategory,
+        amountCents: MoneyCents,
+        frequency: PayFrequency,
+        nextDueDate: Date
+    ) {
+        var ws = activeWorkspace
+        guard let idx = ws.fixedCommitments.firstIndex(where: { $0.id == id }) else { return }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return }
+        let sanitizedAmount = max(0, amountCents)
+        ws.fixedCommitments[idx].title = trimmedTitle
+        ws.fixedCommitments[idx].category = category
+        ws.fixedCommitments[idx].amountCents = sanitizedAmount
+        ws.fixedCommitments[idx].frequency = frequency
+        ws.fixedCommitments[idx].nextDueDate = nextDueDate
+        activeWorkspace = ws
+        recordAudit(
+            action: "FIXED_COMMITMENT_UPDATED",
+            entityType: "FixedCommitment",
+            entityId: id.uuidString,
+            summary: "Updated fixed commitment '\(trimmedTitle)' (\(AustralianMoneyFormatter.format(cents: sanitizedAmount)) \(frequency.displayName))."
         )
     }
 
@@ -1302,7 +1710,7 @@ public final class DaylightStore {
             contributions: initialSavedCents > 0 ? [
                 SavingsContribution(id: UUID(), date: Date(), amountCents: initialSavedCents, note: "Opening balance")
             ] : [],
-            assumptionsNote: "Progress reflects recorded contributions and does not assume investment returns or interest compounding unless manually added.",
+            assumptionsNote: "Progress reflects contributions only, excluding unrecorded returns and compounding.",
             createdAt: Date()
         )
         ws.savingsGoals.append(goal)
@@ -1497,7 +1905,13 @@ public final class DaylightStore {
     /// Generates a fresh, deduplicated daily summary notification from actual calculated `allowanceSummary`
     /// figures and synchronizes OS notification scheduling in the user's Australian time zone.
     public func refreshDailyNotificationsAndSchedule() {
+        if usesLiveClock {
+            referenceDate = Date()
+        }
+        recalculateDerivedState()
+
         var ws = activeWorkspace
+        let auCal = AustralianDateHelper.calendar(for: ws.profile.timeZoneId)
         let summaryPayload = DaylightNotificationScheduler.buildDailyEveningSummary(
             tenantId: activeTenantId,
             referenceDate: referenceDate,
@@ -1506,7 +1920,9 @@ public final class DaylightStore {
             preferences: ws.notificationPreferences
         )
 
-        if let existingIdx = ws.notifications.firstIndex(where: { $0.categoryTag == "daily_summary" && Calendar.current.isDate($0.createdAt, inSameDayAs: referenceDate) }) {
+        if let existingIdx = ws.notifications.firstIndex(where: {
+            $0.categoryTag == "daily_summary" && auCal.isDate($0.createdAt, inSameDayAs: referenceDate)
+        }) {
             ws.notifications[existingIdx].title = summaryPayload.title
             ws.notifications[existingIdx].body = summaryPayload.body
         } else if ws.notificationPreferences.dailySummaryEnabled {
@@ -1518,7 +1934,10 @@ public final class DaylightStore {
                     body: summaryPayload.body,
                     categoryTag: summaryPayload.categoryTag,
                     createdAt: referenceDate,
-                    isRead: false
+                    isRead: false,
+                    notificationType: summaryPayload.categoryTag,
+                    targetSectionRawValue: summaryPayload.targetSectionRawValue,
+                    eventIdentifier: summaryPayload.eventIdentifier
                 ),
                 at: 0
             )
@@ -1531,20 +1950,7 @@ public final class DaylightStore {
         }
         saveWorkspacesIfNeeded()
 
-        let currentProfile = ws.profile
-        let currentSummary = allowanceSummary
-        let currentPrefs = ws.notificationPreferences
-        let tenant = activeTenantId
-        let refDate = referenceDate
-        Task {
-            _ = await DaylightNotificationScheduler.syncScheduledOSNotifications(
-                tenantId: tenant,
-                referenceDate: refDate,
-                profile: currentProfile,
-                summary: currentSummary,
-                preferences: currentPrefs
-            )
-        }
+        syncOSNotificationsInBackground(workspace: ws, summary: allowanceSummary)
     }
 
     // MARK: - Data Export (Sanitized CSV & JSON) and Account Deletion
@@ -1626,6 +2032,11 @@ public final class DaylightStore {
             try? sqliteDatabase?.deleteTenantWorkspace(tenantId: targetTenant)
             try? sqliteDatabase?.saveTenantSnapshot(personalWorkspace)
             Self.deleteWorkspaceFileFromDisk(tenantId: targetTenant)
+            if persistToDisk {
+                Task {
+                    await DaylightNotificationScheduler.clearAllScheduledOSNotifications()
+                }
+            }
             refreshWorkspaceCategories()
             recalculateDerivedState()
             if currentSession == nil {
@@ -1645,13 +2056,28 @@ public final class DaylightStore {
     }
 
     private func saveWorkspacesIfNeeded() {
-        try? sqliteDatabase?.saveTenantSnapshot(activeWorkspace)
+        do {
+            try sqliteDatabase?.saveTenantSnapshot(activeWorkspace)
+        } catch {
+            persistenceErrorMessage = "Your change could not be saved: \(error.localizedDescription)"
+            statusBannerMessage = persistenceErrorMessage
+            return
+        }
         guard persistToDisk else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        if let url = Self.storageURL(for: activeTenantId),
-           let data = try? encoder.encode(activeWorkspace) {
-            try? data.write(to: url, options: .atomic)
+        guard let url = Self.storageURL(for: activeTenantId) else {
+            persistenceErrorMessage = "Your change could not be saved because local storage is unavailable."
+            statusBannerMessage = persistenceErrorMessage
+            return
+        }
+        do {
+            let data = try encoder.encode(activeWorkspace)
+            try data.write(to: url, options: .atomic)
+            persistenceErrorMessage = nil
+        } catch {
+            persistenceErrorMessage = "Your change could not be saved: \(error.localizedDescription)"
+            statusBannerMessage = persistenceErrorMessage
         }
     }
 
@@ -1683,6 +2109,7 @@ public enum AppNavigationSection: String, CaseIterable, Identifiable, Sendable {
     case insights = "Insights"
     case accounts = "Accounts"
     case settings = "Settings"
+    case assistant = "AI Assistant"
 
     public var id: String { rawValue }
 
@@ -1696,6 +2123,7 @@ public enum AppNavigationSection: String, CaseIterable, Identifiable, Sendable {
         case .insights: return "chart.xyaxis.line"
         case .accounts: return "building.columns.fill"
         case .settings: return "gearshape.fill"
+        case .assistant: return "sparkles"
         }
     }
 }

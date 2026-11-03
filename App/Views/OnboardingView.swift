@@ -10,10 +10,10 @@ public struct OnboardingView: View {
     @State private var selectedTimeZone: AustralianTimeZone = .sydney
     @State private var employmentType: EmploymentIncomeType = .salariedEmployee
     @State private var payFrequency: PayFrequency = .fortnightly
-    @State private var takeHomePayDollars: String = "3250.00"
+    @State private var takeHomePayDollars: String = "0.00"
     @State private var nextPayDate: Date = Calendar.current.date(byAdding: .day, value: 14, to: Date()) ?? Date()
-    @State private var fixedExpensesDollars: String = "1150.00"
-    @State private var savingsTargetDollars: String = "500.00"
+    @State private var fixedExpensesDollars: String = "0.00"
+    @State private var savingsTargetDollars: String = "0.00"
     @State private var budgetingMethod: BudgetingMethod = .payCycle
     @State private var validationMessage: String? = nil
 
@@ -37,8 +37,17 @@ public struct OnboardingView: View {
         max(0, parsedTakeHomeCents - parsedFixedCents - parsedSavingsCents)
     }
 
+    private var previewPeriodDays: Int {
+        var tempProfile = store.profile
+        tempProfile.timeZoneId = selectedTimeZone.rawValue
+        tempProfile.payFrequency = payFrequency
+        tempProfile.nextPayDate = nextPayDate
+        tempProfile.preferredBudgetingMethod = budgetingMethod
+        return max(1, FinancialCalculationEngine.currentPeriodHalfOpenBounds(referenceDate: store.referenceDate, profile: tempProfile).totalDays)
+    }
+
     private var previewDailyAllowanceCents: MoneyCents {
-        let days = Int64(max(1, payFrequency.nominalPeriodDays))
+        let days = Int64(previewPeriodDays)
         return previewFlexiblePoolCents / days
     }
 
@@ -50,17 +59,17 @@ public struct OnboardingView: View {
                     stepContent
                     livePreviewCard
                     if let validationMessage {
-                        HStack(spacing: 8) {
+                        HStack(spacing: DaylightTheme.Spacing.xs) {
                             Image(systemName: "exclamationmark.triangle.fill")
                             Text(validationMessage)
-                                .font(.footnote.weight(.medium))
+                                .font(DaylightTypography.captionMedium)
                         }
                         .foregroundStyle(DaylightTheme.cautionRed)
-                        .padding(12)
+                        .padding(DaylightTheme.Spacing.sm)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm)
-                                .fill(DaylightTheme.cautionRed.opacity(0.12))
+                                .fill(DaylightTheme.negativeSurface(for: colorScheme))
                         )
                     }
                     navigationButtons
@@ -77,7 +86,11 @@ public struct OnboardingView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Skip for Now") {
-                        applyConfiguration()
+                        var updatedProfile = store.profile
+                        updatedProfile.onboardingCompleted = true
+                        try? store.updateProfile(updatedProfile)
+                        store.showingOnboardingSheet = false
+                        dismiss()
                     }
                 }
             }
@@ -91,9 +104,7 @@ public struct OnboardingView: View {
                 takeHomePayDollars = String(format: "%.2f", Double(p.typicalTakeHomePayCents) / 100.0)
                 nextPayDate = p.nextPayDate
                 let fixedSum = store.fixedCommitments.reduce(MoneyCents(0)) { $0 + $1.amountCents }
-                if fixedSum > 0 {
-                    fixedExpensesDollars = String(format: "%.2f", Double(fixedSum) / 100.0)
-                }
+                fixedExpensesDollars = String(format: "%.2f", Double(fixedSum) / 100.0)
                 savingsTargetDollars = String(format: "%.2f", Double(p.savingsTargetPerPeriodCents) / 100.0)
                 budgetingMethod = p.preferredBudgetingMethod
             }
@@ -137,6 +148,25 @@ public struct OnboardingView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
+                    HStack(spacing: 14) {
+                        DaylightAvatarView(
+                            avatarImageData: store.profile.avatarImageData,
+                            name: preferredName.isEmpty ? (store.authenticatedSession?.fullName ?? "Alex") : preferredName,
+                            size: 48,
+                            isDemo: store.isDemoMode,
+                            showBorder: true
+                        )
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(preferredName.isEmpty ? (store.authenticatedSession?.fullName ?? "Friend") : preferredName)
+                                .font(.subheadline.weight(.semibold))
+                            Text(store.authenticatedSession?.email ?? "Personal Workspace")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+
                     HStack {
                         Text("Preferred Name")
                             .font(.subheadline.weight(.medium))
@@ -153,8 +183,8 @@ public struct OnboardingView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.secondary.opacity(0.1))
+                            RoundedRectangle(cornerRadius: DaylightTheme.Radius.sm, style: .continuous)
+                                .fill(DaylightTheme.secondarySurface(for: colorScheme))
                         )
                         .accessibilityLabel("Preferred Name: \(preferredName)")
                     }
@@ -309,7 +339,7 @@ public struct OnboardingView: View {
                     Text("How Your Daily Safe-to-Spend Is Calculated")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text("\(payFrequency.nominalPeriodDays)-day cycle")
+                    Text("\(previewPeriodDays)-day cycle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -332,7 +362,7 @@ public struct OnboardingView: View {
                 }
 
                 HStack {
-                    Text("Baseline daily safe-to-spend (÷ \(payFrequency.nominalPeriodDays) days)")
+                    Text("Baseline daily safe-to-spend (÷ \(previewPeriodDays) days)")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(DaylightTheme.accent)
                     Spacer()
@@ -377,7 +407,7 @@ public struct OnboardingView: View {
                     applyConfiguration()
                 }
             } label: {
-                Text(currentStep < 2 ? "Continue" : "Finish Setup & View Dashboard")
+                Text(currentStep < 2 ? "Continue" : "Finish Setup")
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)

@@ -90,6 +90,7 @@ public enum DaylightAuthenticationError: LocalizedError, Equatable, Sendable {
     case sessionExpired
     case networkFailure(String)
     case backendConfigurationRequired
+    case remoteBackendUnavailable
     case unauthorizedWorkspaceAccess
 
     public var errorDescription: String? {
@@ -106,6 +107,8 @@ public enum DaylightAuthenticationError: LocalizedError, Equatable, Sendable {
             return "Unable to reach the authentication service (\(detail)). Please check your connection and try again."
         case .backendConfigurationRequired:
             return "Production authentication backend is not configured. Set DAYLIGHT_AUTH_API_BASE_URL in environment configuration."
+        case .remoteBackendUnavailable:
+            return "Online authentication is configured but unavailable in this build. Remove DAYLIGHT_AUTH_API_BASE_URL or provide the supported authentication client."
         case .unauthorizedWorkspaceAccess:
             return "Your account is not authorised to access the requested financial workspace."
         }
@@ -225,7 +228,44 @@ private struct StoredAccountCredentialRecord: Codable, Sendable {
     var workspaceTenantId: String
     var saltHex: String
     var verifierHex: String
+    var verifierVersion: Int
     var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case userId, email, fullName, workspaceTenantId, saltHex, verifierHex, verifierVersion, createdAt
+    }
+
+    init(
+        userId: String,
+        email: String,
+        fullName: String,
+        workspaceTenantId: String,
+        saltHex: String,
+        verifierHex: String,
+        verifierVersion: Int = 2,
+        createdAt: Date
+    ) {
+        self.userId = userId
+        self.email = email
+        self.fullName = fullName
+        self.workspaceTenantId = workspaceTenantId
+        self.saltHex = saltHex
+        self.verifierHex = verifierHex
+        self.verifierVersion = verifierVersion
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userId = try container.decode(String.self, forKey: .userId)
+        email = try container.decode(String.self, forKey: .email)
+        fullName = try container.decode(String.self, forKey: .fullName)
+        workspaceTenantId = try container.decode(String.self, forKey: .workspaceTenantId)
+        saltHex = try container.decode(String.self, forKey: .saltHex)
+        verifierHex = try container.decode(String.self, forKey: .verifierHex)
+        verifierVersion = try container.decodeIfPresent(Int.self, forKey: .verifierVersion) ?? 1
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 /// Thread-safe Keychain / in-memory credential and session token store.
@@ -306,12 +346,30 @@ public final class DaylightSecureAuthVault: @unchecked Sendable {
     }
 
     public static func derivePasswordVerifier(password: String, saltHex: String) -> String {
+        let passwordData = Data(password.utf8)
+        let saltData = Data(saltHex.utf8)
+        let iterations: UInt32 = 120_000
+        var message = saltData
+        message.append(contentsOf: [0, 0, 0, 1])
+        var u = Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: passwordData)))
+        var derived = u
+        if iterations > 1 {
+            for _ in 2...iterations {
+                u = Data(HMAC<SHA256>.authenticationCode(for: u, using: SymmetricKey(data: passwordData)))
+                for index in derived.indices {
+                    derived[index] ^= u[index]
+                }
+            }
+        }
+        return "pbkdf2-sha256$\(iterations)$\(derived.map { String(format: "%02x", $0) }.joined())"
+    }
+
+    fileprivate static func deriveLegacyPasswordVerifier(password: String, saltHex: String) -> String {
         var digestData = Data((saltHex + ":" + password).utf8)
         for round in 0..<2_048 {
             var roundInput = digestData
             roundInput.append(contentsOf: withUnsafeBytes(of: UInt16(round).bigEndian, Array.init))
-            let digest = SHA256.hash(data: roundInput)
-            digestData = Data(digest)
+            digestData = Data(SHA256.hash(data: roundInput))
         }
         return digestData.map { String(format: "%02x", $0) }.joined()
     }
@@ -349,7 +407,7 @@ public final class DaylightAuthenticationService: DaylightAuthenticationServiceP
         if isOnlineBackendConfigured {
             return "Connected to configured Daylight Authentication API endpoint."
         }
-        return "Local Keychain Identity Provider active for on-device authentication. To enable cross-device cloud accounts, configure DAYLIGHT_AUTH_API_BASE_URL and SESSION_SECRET_KEY (.env.example)."
+        return"Local Keychain Identity Provider active for on-device auth."
     }
 
     public func restoreSession(now: Date = Date()) async throws -> AuthenticatedSession? {
@@ -375,6 +433,9 @@ public final class DaylightAuthenticationService: DaylightAuthenticationServiceP
         password: String,
         now: Date = Date()
     ) async throws -> AuthenticatedSession {
+        guard providerMode != .remoteBackendAPI else {
+            throw DaylightAuthenticationError.remoteBackendUnavailable
+        }
         let validation = AuthFormValidator.validateRegistration(
             fullName: fullName,
             email: email,
@@ -429,6 +490,9 @@ public final class DaylightAuthenticationService: DaylightAuthenticationServiceP
         password: String,
         now: Date = Date()
     ) async throws -> AuthenticatedSession {
+        guard providerMode != .remoteBackendAPI else {
+            throw DaylightAuthenticationError.remoteBackendUnavailable
+        }
         let validation = AuthFormValidator.validateLogin(email: email, password: password)
         if let firstError = validation.firstErrorMessage {
             throw DaylightAuthenticationError.invalidInput(firstError)
@@ -447,16 +511,31 @@ public final class DaylightAuthenticationService: DaylightAuthenticationServiceP
             password: password,
             saltHex: account.saltHex
         )
-        guard candidateVerifier == account.verifierHex else {
-            throw DaylightAuthenticationError.invalidCredentials
+        var authenticatedAccount = account
+        if account.verifierVersion == 1 {
+            guard DaylightSecureAuthVault.deriveLegacyPasswordVerifier(
+                password: password,
+                saltHex: account.saltHex
+            ) == account.verifierHex else {
+                throw DaylightAuthenticationError.invalidCredentials
+            }
+            authenticatedAccount.verifierHex = candidateVerifier
+            authenticatedAccount.verifierVersion = 2
+            var migratedAccounts = accounts
+            migratedAccounts[normalizedEmail] = authenticatedAccount
+            saveStoredAccounts(migratedAccounts)
+        } else {
+            guard candidateVerifier == account.verifierHex else {
+                throw DaylightAuthenticationError.invalidCredentials
+            }
         }
 
         let session = AuthenticatedSession(
             sessionId: "sess_\(UUID().uuidString.lowercased())",
-            userId: account.userId,
-            email: account.email,
-            fullName: account.fullName,
-            workspaceTenantId: account.workspaceTenantId,
+            userId: authenticatedAccount.userId,
+            email: authenticatedAccount.email,
+            fullName: authenticatedAccount.fullName,
+            workspaceTenantId: authenticatedAccount.workspaceTenantId,
             issuedAt: now,
             expiresAt: now.addingTimeInterval(sessionDurationSeconds),
             providerMode: providerMode

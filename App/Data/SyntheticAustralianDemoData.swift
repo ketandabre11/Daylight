@@ -24,9 +24,9 @@ extension DaylightStore {
             timeZoneId: AustralianTimeZone.sydney.rawValue,
             employmentType: .salariedEmployee,
             payFrequency: .fortnightly,
-            typicalTakeHomePayCents: 325_000, // $3,250.00 fortnightly default suggestion
+            typicalTakeHomePayCents: 0,
             nextPayDate: nextPay,
-            savingsTargetPerPeriodCents: 50_000, // $500.00 fortnightly default suggestion
+            savingsTargetPerPeriodCents: 0,
             customFlexibleCapCents: nil,
             preferredBudgetingMethod: .payCycle,
             enableBudgetRollover: false,
